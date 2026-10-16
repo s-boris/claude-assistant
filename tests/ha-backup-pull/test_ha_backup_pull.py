@@ -14,8 +14,10 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import sys
 import unittest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # run directly (python3 -I) or via run.sh
 from fake_ha_backup import TOKEN, FakeHA
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake ~/bin/transcribe: logs args, prints a deterministic transcript naming the chunk file.
+echo "$*" >> "$RL_T/transcribe.log"
+[ -f "$RL_T/transcribe_fail" ] && { echo "transcribe: whisper failed" >&2; exit 1; }
+echo "Spoken words from $(basename "$1"). Second sentence about hardstyle festivals."

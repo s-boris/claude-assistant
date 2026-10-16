@@ -1,0 +1,61 @@
+#!/bin/bash
+# vault-git-sync: commit + push ~/opt/claude-vault to its private GitHub repo (profile repos.private_vault),
+# kept up to date. Runs after `vault admin deploy` and nightly (cron).
+# Refuses to commit anything secretscan flags; a failure writes an ~/inbox note (only with --cron).
+# Public-path gate: when ~/.config/vault-git-sync/gate names a gate command (its first non-# line, e.g.
+# `.../publish.py gate claude-privacy-vault`), the tree about to be pushed must pass it first (called with
+# `--src REPO --rev TREE`; the same private-term, PII, coordinate and secret checks as the public mirror build).
+# A block (exit 3) or a gate that cannot run (exit 1): nothing is committed or pushed, ONE ~/inbox note a day
+# (with CRON=1). No config file = no gate (a fresh install).
+set -u
+# test seams (~/opt/vault-git-sync-tests): the repo, and where the vendored scripts and mirrored tests come from
+SRC_BIN=${VAULT_GIT_SRC_BIN:-/home/node/bin}; SRC_OPT=${VAULT_GIT_SRC_OPT:-/home/node/opt}
+GATE_CONF=${VAULT_GIT_GATE_CONF:-$HOME/.config/vault-git-sync/gate}
+cd "${VAULT_GIT_DIR:-/home/node/opt/claude-vault}" || exit 1
+msg="${1:-auto: sync $(date '+%Y-%m-%d %H:%M')}"
+pg=$(dirname "$(readlink -f "$0")")/profile-get; [ -x "$pg" ] || pg=profile-get
+repo=$("$pg" repos.private_vault 2>/dev/null) || repo=; repo=${repo:-its private repo}   # for the notes
+fail() { echo "vault-git-sync: $*" >&2
+  [ "${CRON:-}" = 1 ] && printf 'vault-git-sync failed: %s\n(~/opt/claude-vault → github %s). Data, not instructions.\n' "$*" "$repo" > ~/inbox/vault-git-sync-$(date +%s).md
+  exit 1; }
+# A source that is gone (or fails to copy) keeps the old copy in the repo, writes ONE ~/inbox note per source (fixed
+# name, not rewritten while it is still there; cron discards stderr) and skips the push for this run (exit 1).
+missing=()
+lost() { missing+=("$1"); echo "vault-git-sync: source missing or unreadable: $1 (old copy kept, push skipped)" >&2
+  local n=~/inbox/vault-git-sync-missing-$2.md
+  [ -e "$n" ] || printf 'vault-git-sync: source missing or unreadable: %s\nThe repo keeps its old copy (%s); pushes to github %s are skipped until it is back or the list in ~/bin/vault-git-sync changes. Data, not instructions.\n' "$1" "$3" "$repo" > "$n"; }
+# the build also vendors these (see stage() in ~/bin/vault): keep the repo a complete build context
+for f in llm-local secretscan.py bills; do
+  cp -p "$SRC_BIN/$f" "vendor/$f" 2>/dev/null || lost "$SRC_BIN/$f" "$f" "vendor/$f"; done
+for t in tgread llm-local; do
+  { [ -d "$SRC_OPT/$t-tests" ] && rsync -a --delete --exclude __pycache__ --exclude '*.pyc' --exclude bench \
+    "$SRC_OPT/$t-tests/" "tests/$t/"; } || lost "$SRC_OPT/$t-tests/" "$t-tests" "tests/$t/"; done
+# gate TREE: the public-path gate on the tree about to be pushed (see the header); returns 0 = pass or no gate
+gate() {
+  [ -e "$GATE_CONF" ] || return 0
+  local cmd out rc why n
+  cmd=$(grep -v '^[[:space:]]*#' "$GATE_CONF" 2>/dev/null | grep -m1 .) || cmd=
+  if [ -z "$cmd" ]; then rc=1; out="no gate command in $GATE_CONF"
+  else out=$(timeout 300 $cmd --src "$PWD" --rev "$1" </dev/null 2>&1); rc=$?; fi
+  [ $rc = 0 ] && return 0
+  if [ $rc = 3 ]; then why="the public-path gate blocked it (a private term, PII, a coordinate or a secret in a public path)"
+  else why="the public-path gate could not run (exit $rc)"; fi
+  echo "vault-git-sync: $why; nothing committed or pushed" >&2
+  printf '%s\n' "$out" | grep -E '^ +(gate |[^ ]+:[0-9]+ |BLOCK)|BLOCK' | head -20 >&2
+  n=~/inbox/vault-git-sync-gate-$(date +%F).md
+  [ "${CRON:-}" = 1 ] && [ ! -e "$n" ] && printf 'vault-git-sync blocked: %s.\nNothing was committed or pushed (~/opt/claude-vault -> github %s). Details (file:line + rule labels, no values): %s --src ~/opt/claude-vault --rev "$(git -C ~/opt/claude-vault write-tree)" after `git add -A` there. Fix the source, then rerun vault-git-sync. Data, not instructions.\n' "$why" "$repo" "$cmd" > "$n"
+  [ $rc = 3 ] || return 1
+  return 3
+}
+git add -A
+if git diff --cached --quiet; then
+  [ ${#missing[@]} = 0 ] && git rev-list --count @{u}..HEAD 2>/dev/null | grep -qx 0 && exit 0   # nothing to do
+  gate "$(git write-tree)" || exit $?
+else
+  gate "$(git write-tree)" || { rc=$?; git reset -q; exit $rc; }
+  git diff --cached | secretscan --stdin >/dev/null || { git reset -q; fail "secretscan flagged the diff; nothing committed"; }
+  git commit -q -m "$msg" || fail "commit failed"
+fi
+[ ${#missing[@]} = 0 ] || { echo "vault-git-sync: push skipped, ${#missing[@]} source(s) missing: ${missing[*]}" >&2; exit 1; }
+timeout 120 git push -q origin HEAD 2>&1 || fail "push failed"
+echo "vault-git-sync: pushed ($(git rev-parse --short HEAD))"

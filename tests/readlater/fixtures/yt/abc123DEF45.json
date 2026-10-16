@@ -1,0 +1,100 @@
+{
+ "id": "abc123DEF45",
+ "title": "MoE routing explained",
+ "channel": "Test Channel",
+ "uploader": "testchan",
+ "upload_date": "20260915",
+ "duration": 95,
+ "language": "en",
+ "live_status": "not_live",
+ "is_live": false,
+ "webpage_url": "https://www.youtube.com/watch?v=abc123DEF45",
+ "extractor_key": "Youtube",
+ "description": "In this video we explain MoE routing.\n\n00:00 Intro\n01:00 Deep dive\nSponsor: example.com",
+ "chapters": [
+  {
+   "start_time": 0,
+   "title": "Intro",
+   "end_time": 60
+  },
+  {
+   "start_time": 60,
+   "title": "Deep dive",
+   "end_time": 95
+  }
+ ],
+ "subtitles": {
+  "en": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "de": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "live_chat": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ]
+ },
+ "automatic_captions": {
+  "en-orig": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "en": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "de": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "fr": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ]
+ }
+}

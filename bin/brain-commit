@@ -1,0 +1,11 @@
+#!/bin/sh
+# brain-commit "msg": snapshot my config/memory into the brain repo (see: brain help). Blocks on any secret.
+# After a successful snapshot it also starts codebase-sync in the background (sanitized export to the private
+# GitHub repo, profile key repos.private_code; failures -> one ~/inbox note). Skipped in tests (BRAIN_GIT_DIR/BRAIN_WORK_TREE
+# set) and when ~/.config/codebase-sync/off exists.
+d=$(dirname "$(readlink -f "$0")")
+"$d/brain" commit "$@"; rc=$?
+if [ "$rc" = 0 ] && [ -z "${BRAIN_GIT_DIR:-}${BRAIN_WORK_TREE:-}" ] && [ -x "$d/codebase-sync" ]; then
+  "$d/codebase-sync" --bg >/dev/null 2>&1 || true
+fi
+exit "$rc"

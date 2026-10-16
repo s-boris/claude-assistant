@@ -1,0 +1,57 @@
+{
+  "_comment": "Copy to ~/.config/assistant/profile.json (chmod 600) and replace the placeholders with your values. Keys you leave out keep these defaults. Read by bin/lib/assistant_profile.py and bin/profile-get; see docs/CONFIGURATION.md (Profile).",
+  "owner": {
+    "first_name": "Alex",
+    "last_name": "Doe",
+    "email": "owner@example.com",
+    "phone": "+41 00 000 00 00",
+    "birth_year": 1990,
+    "github": "s-boris"
+  },
+  "home": {
+    "street": "Examplestrasse 1",
+    "postcode": "1234",
+    "town": "Exampletown",
+    "town_aliases": [],
+    "canton": "XX",
+    "municipality_bfs": 9001,
+    "lat": 47.5,
+    "lon": 8.5
+  },
+  "work": {
+    "town": "Worktown",
+    "lat": 47.3769,
+    "lon": 8.5417
+  },
+  "locale": {
+    "tz": "Europe/Zurich",
+    "lang": "en",
+    "country": "CH"
+  },
+  "network": {
+    "server_name": "Homesrv",
+    "server_host": "198.51.100.5",
+    "lan_prefix": "198.51.100.",
+    "domain": "example.net",
+    "hosts": {
+      "web_vm": "user@198.51.100.3"
+    }
+  },
+  "services": {
+    "seerr_user": "Alex",
+    "ha_user": "Alex",
+    "ha_url": "http://198.51.100.7:8123",
+    "ha_phone": "phone",
+    "ha_keep_models": []
+  },
+  "repos": {
+    "private_code": "s-boris/claude-assistant",
+    "private_vault": "s-boris/claude-privacy-vault",
+    "public_code": "s-boris/claude-assistant",
+    "public_vault": "s-boris/claude-privacy-vault"
+  },
+  "interests": {
+    "topics": [],
+    "events": []
+  }
+}

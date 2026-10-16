@@ -1,0 +1,12 @@
+#!/bin/sh
+# The main session. entrypoint restarts it when it exits; `restart` restarts it on purpose.
+# 2026-10-11: + heartbeat mod, disableAgentView, crossSessionInbound refuse (see ops/start-claude for why).
+cd ~/workspace || exit
+# 2026-10-12: keep the bot token out of this session's env; the plugin and tg read its 0600 .env (see ops/start-claude).
+unset TELEGRAM_BOT_TOKEN
+tmux set-environment -g -u TELEGRAM_BOT_TOKEN 2>/dev/null
+# Pick the conversation back up, unless there isn't one yet.
+ls ~/.claude/projects/-home-node-workspace/*.jsonl >/dev/null 2>&1 && resume=--continue
+exec claude $resume --permission-mode bypassPermissions --remote-control claude-bot \
+  --channels plugin:telegram@claude-plugins-official \
+  --settings '{"enabledPlugins":{"telegram@claude-plugins-official":true,"heartbeat@home-plugins":true},"disableAgentView":true,"crossSessionInbound":"refuse"}'

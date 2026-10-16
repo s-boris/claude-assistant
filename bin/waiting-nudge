@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""waiting-nudge: daily cue to ask the owner about items in TODO.md "Waiting on you".
+Ask the owner from time to time about what is waiting for him: my job is to take care of everything
+on the board.
+Tracks when each item first appeared and when it was last asked (~/.local/state/waiting-nudge.json).
+  waiting-nudge            list items with age / last asked
+  waiting-nudge --cron     write ONE ~/inbox note if any item is due for a nudge (not asked in 2 days)
+  waiting-nudge asked "substring"   mark matching item(s) as asked today
+Test seams (~/opt/waiting-nudge-tests): WAITING_NUDGE_TODO, WAITING_NUDGE_STATE, WAITING_NUDGE_INBOX (paths),
+WAITING_NUDGE_TODAY (YYYY-MM-DD instead of today's date).
+"""
+import json, os, re, sys, datetime as dt
+HOME = os.path.expanduser('~')
+TODO = os.environ.get('WAITING_NUDGE_TODO') or f'{HOME}/workspace/TODO.md'
+STATE = os.environ.get('WAITING_NUDGE_STATE') or f'{HOME}/.local/state/waiting-nudge.json'
+INBOX = os.environ.get('WAITING_NUDGE_INBOX') or f'{HOME}/inbox'
+GAP_DAYS = 2
+
+def today():
+    v = os.environ.get('WAITING_NUDGE_TODAY')
+    return dt.date.fromisoformat(v) if v else dt.date.today()
+
+def items():
+    out, on = [], False
+    for line in open(TODO, encoding='utf-8'):
+        if line.startswith('## '):
+            on = line.strip() == '## Waiting on you'; continue
+        if on and line.startswith('- '):
+            m = re.match(r'- \*\*(.+?)\*\*', line)
+            out.append((m.group(1) if m else line[2:].strip())[:160])
+    return out
+
+def load():
+    try: return json.load(open(STATE))
+    except Exception: return {}
+
+def save(s):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + '.tmp'; json.dump(s, open(tmp, 'w'), indent=1, ensure_ascii=False); os.replace(tmp, STATE)
+
+def sync():
+    s, d = load(), today().isoformat()
+    cur = items()
+    s = {k: v for k, v in s.items() if k in cur}
+    for k in cur: s.setdefault(k, {'since': d, 'asked': None})
+    save(s); return s
+
+def due(s):
+    t = today()
+    def ok(v):
+        a = v.get('asked') or v['since']
+        return (t - dt.date.fromisoformat(a)).days >= GAP_DAYS
+    return sorted([k for k, v in s.items() if ok(v)], key=lambda k: s[k].get('asked') or s[k]['since'])
+
+def main(a):
+    s = sync()
+    if a[:1] == ['asked'] and len(a) > 1:
+        n = 0
+        for k in s:
+            if a[1].lower() in k.lower(): s[k]['asked'] = today().isoformat(); n += 1
+        save(s); print(f'marked {n}'); return
+    if a[:1] == ['--cron']:
+        d = due(s)
+        if not d: return
+        p = f'{INBOX}/waiting-nudge-{today()}.md'
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('Waiting-on-you nudge (ask him from time to time; my job is to clear the board).\n'
+                    'Pick the 1-3 most valuable/urgent items below, check each is still open (vault/calendar/mail first),\n'
+                    'then ONE short Telegram message: one line per item + buttons for quick answers (or a concrete '
+                    'proposal he can 👍). Then `waiting-nudge asked "<substring>"` for each item asked. Never in quiet hours.\n\n')
+            for k in d:
+                v = s[k]; f.write(f'- {k}  (waiting since {v["since"]}, last asked {v.get("asked") or "never"})\n')
+        return
+    for k, v in s.items():
+        print(f'{v["since"]}  asked {v.get("asked") or "never":10}  {k}')
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

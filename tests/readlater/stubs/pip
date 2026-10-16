@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake venv pip for `readlater update`: mode in $RL_T/pip_mode (ok|break|fail). Logs args.
+echo "$*" >> "$RL_T/pip.log"
+mode=$(cat "$RL_T/pip_mode" 2>/dev/null || echo ok)
+case "$*" in *"yt-dlp[default]=="*) echo "${*##*==}" > "$RL_T/ytver"; exit 0 ;; esac
+case "$mode" in
+  ok) echo 2026.10.01 > "$RL_T/ytver" ;;
+  break) echo "Traceback: ImportError" > "$RL_T/ytver" ;;
+  fail) echo "ERROR: Could not find a version (network unreachable)" >&2; exit 1 ;;
+esac

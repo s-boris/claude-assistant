@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# transcribe <audio-file> [--lang auto|de|en|sr|...]
+# Local speech-to-text (whisper.cpp, large-v3-turbo q8_0, CPU). Prints the transcript to stdout only.
+# Any audio/video ffmpeg can read works (Telegram voice notes are OGG/Opus).
+#
+# Env overrides:
+#   TRANSCRIBE_MODEL    ggml model path (default ~/opt/whisper-models/ggml-large-v3-turbo-q8_0.bin)
+#   TRANSCRIBE_THREADS  CPU threads (default min(nproc, 24); 32 is much slower when the host is busy)
+#   TRANSCRIBE_LANGS    the owner's languages (default de,en,sr). With --lang auto, if Whisper detects a
+#                       language outside this set that it commonly confuses with one inside it (e.g. ru/hr/sk
+#                       for Serbian, nl/lb for Swiss German), the note is re-run in that language.
+#   TRANSCRIBE_DEBUG=1  show whisper/ffmpeg logs on stderr
+#
+# whisper.cpp lives in ~/opt/whisper.cpp with a local patch (~/opt/whisper-patches) that skips the
+# duplicate encoder pass after language detection (~40% faster for notes up to 30 s).
+# Rebuild/update: apt install build-essential cmake; cd ~/opt/whisper.cpp; git pull (re-apply the patch with
+# git apply ~/opt/whisper-patches/*.patch); cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON;
+# cmake --build build -j 24.
+# Measured 2026-10-09 (24 threads, busy host): 30 s note ~4.8 s, 60 s ~9.8 s; +~4 s on a Slavic re-run.
+set -euo pipefail
+
+usage() { echo "usage: transcribe <audio-file> [--lang auto|de|en|sr|...]" >&2; exit 2; }
+
+lang=auto; file=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --lang|-l) [ $# -ge 2 ] || usage; lang=$2; shift 2 ;;
+    --lang=*) lang=${1#--lang=}; shift ;;
+    -h|--help) usage ;;
+    *) [ -z "$file" ] || usage; file=$1; shift ;;
+  esac
+done
+[ -n "$file" ] || usage
+[ -r "$file" ] || { echo "transcribe: cannot read '$file'" >&2; exit 1; }
+
+WHISPER=$HOME/opt/whisper.cpp/build/bin/whisper-cli
+MODELS=$HOME/opt/whisper-models
+model=${TRANSCRIBE_MODEL:-$MODELS/ggml-large-v3-turbo-q8_0.bin}
+vad=$MODELS/ggml-silero-v6.2.0.bin
+threads=${TRANSCRIBE_THREADS:-$(( $(nproc) < 24 ? $(nproc) : 24 ))}
+allowed=${TRANSCRIBE_LANGS:-de,en,sr}
+
+for f in "$WHISPER" "$model" "$vad"; do
+  [ -e "$f" ] || { echo "transcribe: missing $f (see ~/opt/whisper-models, ~/opt/whisper.cpp)" >&2; exit 1; }
+done
+command -v ffmpeg >/dev/null || { echo "transcribe: ffmpeg not installed (boot.sh installs it)" >&2; exit 1; }
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/transcribe.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+log() { if [ "${TRANSCRIBE_DEBUG:-}" = 1 ]; then cat "$1" >&2; fi; }
+
+ffmpeg -nostdin -hide_banner -loglevel error -y -i "$file" -vn -ac 1 -ar 16000 -c:a pcm_s16le "$tmp/in.wav" 2>"$tmp/ffmpeg.log" \
+  || { cat "$tmp/ffmpeg.log" >&2; echo "transcribe: ffmpeg could not decode '$file'" >&2; exit 1; }
+
+acargs=
+if [ -n "${TX_AC:-}" ]; then
+  dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$tmp/in.wav")
+  ac=$(awk -v d="$dur" -v m="${TX_AC}" 'BEGIN{a=int((d+m)*50); a=int((a+63)/64)*64; if(a>1500)a=1500; print a}')
+  acargs="-ac $ac"
+fi
+run() {  # run <lang>: transcript -> $tmp/out.txt, logs -> $tmp/whisper.log
+  # VAD (silero) drops silence/noise, which otherwise makes Whisper hallucinate ("you", "Untertitel ...").
+  "$WHISPER" -m "$model" -f "$tmp/in.wav" -l "$1" -t "$threads" -nt ${TX_PROMPT:+--prompt "$TX_PROMPT"} ${TX_EXTRA:-} $acargs \
+    --vad -vm "$vad" -vp 200 -vsd 500 >"$tmp/out.txt" 2>"$tmp/whisper.log" \
+    || { cat "$tmp/whisper.log" >&2; echo "transcribe: whisper failed" >&2; exit 1; }
+  log "$tmp/whisper.log"
+}
+
+run "$lang"
+
+if [ "$lang" = auto ]; then
+  detected=$(sed -n 's/.*auto-detected language: \([a-z]*\).*/\1/p' "$tmp/whisper.log" | head -1)
+  case ",$allowed," in *",$detected,"*) retry= ;; *)
+    retry=
+    case "$detected" in
+      ru|uk|be|bg|mk|hr|bs|sl|sk|cs|pl) retry=sr ;;   # Slavic confusions -> Serbian
+      nl|lb|af|yi|da|no|nn|sv) retry=de ;;            # Germanic confusions (Swiss speakers) -> German
+    esac
+    case ",$allowed," in *",$retry,"*) ;; *) retry= ;; esac ;;
+  esac
+  if [ -n "$retry" ]; then
+    [ "${TRANSCRIBE_DEBUG:-}" = 1 ] && echo "transcribe: detected '$detected', re-running as '$retry'" >&2
+    run "$retry"
+  fi
+fi
+
+# One line per segment from whisper; join into one clean paragraph.
+sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$tmp/out.txt" | grep -v '^$' | paste -sd' ' - || true

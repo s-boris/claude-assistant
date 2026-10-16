@@ -1,0 +1,13 @@
+# fixture robots.txt
+User-agent: *
+Disallow: /private/
+Allow: /private/ok.html
+Disallow: /*.secret$
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: Claude-User
+Disallow: /noclaude/
+Disallow: /private/
+Allow: /private/ok.html

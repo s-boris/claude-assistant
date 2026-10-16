@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Fake yt-dlp for readlater tests: no network. Logs argv to $RL_T/ytdlp.log.
+-J URL               prints fixtures/yt/<video id>.json (id = v= param or last path part), else ERROR exit 1
+--load-info-json F --skip-download --write-subs|--write-auto-subs --sub-langs K -o P
+                     copies fixtures/yt/<id>.<K>.<ext> to P with %(ext)s -> <K>.<ext> (none: writes nothing)
+--load-info-json F -f FMT -o P   copies $RL_T/ep.wav to P with %(ext)s -> wav
+--version            prints $RL_T/ytver (default 2026.08.19)"""
+import json, os, re, shutil, sys, glob
+T = os.environ['RL_T']; FIX = os.environ['RL_FIX']
+a = sys.argv[1:]
+with open(os.path.join(T, 'ytdlp.log'), 'a') as f:
+    f.write(' '.join(a) + '\n')
+def opt(name):
+    return a[a.index(name) + 1] if name in a else None
+if '--version' in a:
+    try:
+        print(open(os.path.join(T, 'ytver')).read().strip())
+    except OSError:
+        print('2026.08.19')
+    sys.exit(0)
+if '-J' in a:
+    url = opt('-J')
+    m = re.search(r'[?&]v=([\w-]+)', url) or re.search(r'/([\w-]+)/?$', url)
+    p = os.path.join(FIX, 'yt', (m.group(1) if m else 'none') + '.json')
+    if not os.path.exists(p):
+        print(f'ERROR: [youtube] {m.group(1) if m else url}: Video unavailable', file=sys.stderr)
+        sys.exit(1)
+    sys.stdout.write(open(p).read())
+    sys.exit(0)
+info = json.load(open(opt('--load-info-json')))
+out = opt('-o')
+if '--skip-download' in a:
+    key = opt('--sub-langs').replace('\\', '')
+    for src in glob.glob(os.path.join(FIX, 'yt', f"{info['id']}.{key}.*")):
+        ext = src.rsplit('.', 1)[1]
+        shutil.copy(src, out.replace('%(ext)s', f'{key}.{ext}'))
+    sys.exit(0)
+if '-f' in a:
+    shutil.copy(os.path.join(T, 'ep.wav'), out.replace('%(ext)s', 'wav'))
+    sys.exit(0)
+sys.exit(3)

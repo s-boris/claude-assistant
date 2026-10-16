@@ -1,0 +1,67 @@
+#!/bin/sh
+# Owner's nginx reverse proxy on the Webserver VM (profile network.hosts.web_vm; full /etc/nginx write access, owner-approved).
+#   proxy pull                 mirror /etc/nginx into ~/opt/nginx-mirror (git) and commit any drift
+#   proxy push "message"       commit the edited mirror, copy it to the server (never deletes there), nginx -t, reload;
+#                              a failed nginx -t rolls back (revert + copy back, not reloaded)
+#   proxy test                 nginx -t on the server
+#   proxy cert NAME            certificate for NAME.<domain> (or <domain>; profile network.domain) via /usr/local/sbin/claude-cert
+#   proxy log [N]              git history of the mirror
+# Workflow: proxy pull → edit ~/opt/nginx-mirror/etc-nginx/... → proxy push "why". Ask the owner before exposing anything new.
+case "${1:-}" in
+  pull|push|test|cert|log) ;;
+  *) sed -n '2,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+     case ${1:-} in ""|help|-h|--help) exit 0;; *) exit 2;; esac ;;
+esac
+# test seams (~/opt/proxy-tests): the server and the mirror. The server's default and the domain come from the
+# profile (~/.config/assistant/profile.json via profile-get: next to this script, else on PATH).
+pg=$(dirname "$(readlink -f "$0")")/profile-get; [ -x "$pg" ] || pg=profile-get
+host=${PROXY_HOST:-$("$pg" network.hosts.web_vm)} || exit 1
+m=${PROXY_MIRROR:-$HOME/opt/nginx-mirror}
+cd "$m" || exit 1
+pull() {
+  stash=$(mktemp -d)
+  rsync -a --delete --exclude=/dash-www "$host:/etc/nginx/" "$stash/" || { rm -rf "$stash"; exit 1; }
+  # Commit the live state (as "drift") without losing local edits (new untracked files count too).
+  [ -z "$(git status --porcelain --untracked-files=all -- etc-nginx)" ] && git diff --cached --quiet \
+    || { echo "proxy: local edits pending (git -C $m status); push or discard them first" >&2; rm -rf "$stash"; return 1; }
+  rsync -a --delete --exclude=/dash-www "$stash/" etc-nginx/; rm -rf "$stash"
+  git add -A etc-nginx && { git diff --cached --quiet || git commit -qm "${1:-drift: live state}"; }
+}
+case "$1" in
+  pull) pull "live state $(date '+%F %T')" && git log --oneline -1 ;;
+  push)
+    msg=${2:?message}
+    git add -A etc-nginx
+    git diff --cached --quiet && { echo "nothing to push"; exit 0; }
+    git commit -qm "$msg" || exit 1
+    if ! rsync -rl --checksum --omit-dir-times --no-perms --no-times etc-nginx/ "$host:/etc/nginx/"; then
+      # undo the commit so a retry still has something to push (the edits stay staged)
+      git reset -q --soft HEAD~1
+      echo "proxy: copy to the server FAILED; local commit undone (edits kept, retry 'proxy push'). Part of it may have arrived: run 'proxy test'." >&2
+      exit 1
+    fi
+    if ssh "$host" 'sudo -n /usr/sbin/nginx -t' 2>&1 | tail -2 | grep -q 'test is successful'; then
+      ssh "$host" 'sudo -n /usr/bin/systemctl reload nginx' && { echo "pushed + reloaded: $msg"; exit 0; }
+      echo "proxy: nginx -t passed but the reload FAILED: the server has the new files, nginx still runs the old config. NOT rolled back; check 'proxy test' and the VM." >&2
+      exit 1
+    else
+      echo "nginx -t FAILED; rolling back" >&2
+      ssh "$host" 'sudo -n /usr/sbin/nginx -t' 2>&1 | tail -5 >&2
+      added=$(git diff --name-only --diff-filter=A HEAD~1 HEAD -- etc-nginx 2>/dev/null)
+      if git revert --no-edit HEAD >/dev/null && rsync -rl --checksum --omit-dir-times --no-perms --no-times etc-nginx/ "$host:/etc/nginx/" \
+         && ssh "$host" 'sudo -n /usr/sbin/nginx -t' >/dev/null 2>&1; then
+        echo "rolled back (config restored, not reloaded)" >&2
+      else
+        echo "proxy: ROLLBACK INCOMPLETE: nginx -t still fails (or the copy back failed). nginx was not reloaded, but its next reload or restart will fail: fix it now ('proxy test')." >&2
+        [ -z "$added" ] || printf 'files this push added are still on the server (the copy never deletes):\n%s\n' "$added" >&2
+      fi
+      exit 1
+    fi ;;
+  test) ssh "$host" 'sudo -n /usr/sbin/nginx -t' ;;
+  cert) n=${2:?name}; dom=$("$pg" network.domain) || exit 1
+        case $n in *."$dom"|"$dom") ;; *) n=$n.$dom;; esac
+        # n goes into a remote shell command: hostname characters only
+        case $n in -*|.*|*..*|*[!A-Za-z0-9.-]*) echo "proxy: bad name: $2" >&2; exit 2;; esac
+        ssh "$host" "sudo -n /usr/local/sbin/claude-cert $n" && pull "certbot: $n" ;;
+  log) git log --oneline -"${2:-15}" ;;
+esac

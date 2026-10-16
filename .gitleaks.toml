@@ -1,0 +1,11 @@
+# gitleaks: default rules + an allowlist for values planted on purpose in tests (none of them is a credential).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Planted test fakes"
+regexTarget = "line"
+regexes = [
+  '''SEERR-KEY-Zq81|RADARR-KEY-Xw42|SONARR-KEY-Vy73''',
+  '''X-Api-Key: abcdef123456''',
+]

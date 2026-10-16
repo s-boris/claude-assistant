@@ -1,0 +1,4 @@
+# Suites that need runtimes CI does not have (local venvs, audio models, a real browser). One per line: name reason
+letter needs ~/opt/letter-venv (reportlab, pypdf, pikepdf, Pillow; built by boot.sh); passes with it
+readlater needs ~/opt/readlater-venv (trafilatura, brotli, yt-dlp; built by boot.sh); passes with it
+tgread tests the privacy vault's tgread (claude-privacy-vault: vendor/tgread, same test file) with its Telethon venv; this repo only has the `vault tg` wrapper

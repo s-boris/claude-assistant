@@ -1,0 +1,48 @@
+#!/bin/sh
+# Nightly off-container backup of my setup to the owner's Unraid "backup" share (owner-approved).
+#   brain-backup            make today's archive, prune ones older than KEEP days
+#   brain-backup --list     show archives on the server
+#   brain-backup --verify [FILE] [--cron]   test-restore the newest (or FILE) into a temp dir and check it
+#                                           (~/bin/brain-backup-verify; monthly cron, inbox note on failure)
+#   brain-backup --to FILE  write the archive to a local FILE instead (no upload, no pruning; for tests)
+# Restore: unraid-ssh run backup-cat <file> | tar -xzf - -C ~
+#   (the archives are in /mnt/user/backup/claude-bot on the server; --list shows them)
+# SSH lockdown (~/opt/unraid-lockdown): my key is forced into the dispatcher, so the upload is the verb
+# `backup-store NAME` (name/path-locked, today's or yesterday's date only, server prunes > 14 days) and
+# --list is `backup-list`; the raw ssh commands below apply only with a root key (unraid-ssh mode root).
+# Never includes ~/.secrets, transcripts (*.jsonl), node_modules or models, nor the private context files
+# (~/.local/state/context/telegram.md, signals.md, location.json, signals.json).
+# Nor the recall index (~/.local/state/recall: derived from transcripts, rebuildable with `recall --rebuild`).
+dest=/mnt/user/backup/claude-bot
+keep=${KEEP:-14}
+us=${UNRAID_SSH_BIN:-$HOME/bin/unraid-ssh}
+locked() { case $("$us" mode 2>/dev/null) in verbs|emulate) return 0 ;; *) return 1 ;; esac; }
+case $1 in -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; -*) case $1 in --list|--verify|--to) ;; *) echo "brain-backup: unknown option $1" >&2; exit 2 ;; esac ;; esac
+if [ "$1" = --list ]; then if locked; then exec "$us" run backup-list; fi; ssh unraid "ls -lh $dest"; exit; fi
+if [ "$1" = --verify ]; then shift; exec "$HOME/bin/brain-backup-verify" "$@"; fi
+to=; if [ "$1" = --to ]; then to=$(realpath -m "$2") || exit 1; fi
+verbs=; [ -z "$to" ] && locked && verbs=1
+cd ~ || exit 1
+name=claude-bot-$(date +%F).tar.gz
+set -- workspace bin .config .brain.git reports .local/state crontab boot.sh \
+  .claude/settings.json .claude/skills .claude/agents .claude/projects/-home-node-workspace/memory \
+  plugins opt/*-tests opt/dash opt/unraid-lockdown .claude/channels/telegram/instant.json \
+  opt/nginx-mirror opt/firefly-sync-src opt/privacy-chunk1-client opt/llm-bench opt/test-tools opt/whisper-patches \
+  opt/browser-mcp opt/*requirements*.txt .claude/hooks
+existing=; for p in "$@"; do [ -e "$p" ] && existing="$existing $p"; done
+# tar's own exit code (a pipeline only reports the upload's): 0 ok, 1 = a file changed while read (normal for live
+# state), >= 2 = fatal, the archive is incomplete (so a dead tar never uploads an empty file with exit 0).
+rcf=$(mktemp "${TMPDIR:-/tmp}/brain-backup-tar.XXXXXX") || exit 1
+trap 'rm -f "$rcf"' EXIT
+fail() { [ -n "$to" ] || echo "brain-backup failed $(date '+%F %T')${1:+: $1}" > ~/inbox/brain-backup-failed-$(date +%s).md; exit 1; }
+# shellcheck disable=SC2086
+{ tar -czf - --exclude=node_modules --exclude='*.jsonl' --exclude=.secrets --exclude='*.env' \
+    --exclude='.credentials*' --exclude=__pycache__ --exclude=access.json --exclude='Crash Reports' --exclude='*.dmp' \
+    --exclude=.local/state/context/telegram.md --exclude=.local/state/context/signals.md \
+    --exclude=.local/state/context/signals.json \
+    --exclude=.local/state/context/location.json --exclude=.local/state/recall --exclude=.local/state/vault-events $existing 2>/dev/null; echo $? > "$rcf"; } |
+  if [ -n "$to" ]; then cat > "$to"; elif [ -n "$verbs" ]; then "$us" run backup-store "$name"; else
+  ssh unraid "mkdir -p $dest && cat > $dest/.$name.part && mv $dest/.$name.part $dest/$name &&
+              find $dest -name 'claude-bot-*.tar.gz' -mtime +$keep -delete && ls -l $dest/$name"
+  fi || fail
+trc=$(cat "$rcf" 2>/dev/null); [ "${trc:-2}" -le 1 ] 2>/dev/null || fail "tar exit ${trc:-?}, archive incomplete"

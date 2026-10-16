@@ -1,0 +1,575 @@
+#!/usr/bin/env python3
+"""tg-cmd: short, Telegram-friendly answers for the bot's instant commands (telegram-plus 0.1.8+).
+
+  tg-cmd bills        open bills, overdue first (~/bin/bills)
+  tg-cmd queue        Sonarr/Radarr download queue (~/bin/media queue)
+  tg-cmd space        Unraid array/pool usage + fill-up forecast (unraid-capacity, one read-only ssh;
+                      falls back to the last daily sample)
+  tg-cmd reminders    the owner's next 10 reminders (~/bin/remind list, owner ones only)
+  tg-cmd home         Home Assistant at a glance: lights on per room, room temperatures, vacuum, media
+                      playing, low batteries (one `ha list --json` read, privacy-gated) + open problems of
+                      the latest ha-health-watch snapshot (new vs known-offline). Read-only; never reads
+                      person/device_tracker/zone/proximity/geo_location entities.
+  tg-cmd --list           names and menu descriptions
+  tg-cmd --instant-json   the plugin's table (~/.claude/channels/telegram/instant.json):
+                          tg-cmd --instant-json > ~/.claude/channels/telegram/instant.json
+
+The telegram-plus plugin runs `tg-cmd <name>` when the owner sends exactly /<name> and sends the output
+itself, without a Claude turn. Every data source runs with a timeout (whole answer < ~15 s; the plugin
+allows 20 s). Exit 0 = answer printed. Exit 3 = the data source failed: a short "⚠️ …" fallback is
+printed; the plugin sends it and tells the session. Exit 2 = usage.
+Output is plain text (no Markdown), at most ~3500 characters, and goes through secretscan's redact()
+as a safety net. Nothing here writes anywhere.
+Testing env: TG_CMD_BIN (dir with bills/media/remind/unraid-capacity/ha; default ~/bin),
+TG_CMD_NOW ("YYYY-MM-DD HH:MM", Zurich), BILLS_STATE_DIR / REMIND_DB pass through to those scripts,
+HA_HEALTH_DIR (ha-health-watch's state dir; default ~/.local/state/ha/health).
+"""
+import json, os, re, signal, subprocess, sys
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
+
+sys.dont_write_bytecode = True
+TZ = ZoneInfo("Europe/Zurich")
+BIN = os.path.expanduser(os.environ.get("TG_CMD_BIN") or "~/bin")
+HEALTH_DIR = os.path.expanduser(os.environ.get("HA_HEALTH_DIR") or "~/.local/state/ha/health")
+MAX_CHARS = 3500
+
+
+class Fail(Exception):
+    """A data source failed; str() is the owner-facing reason (short, redacted)."""
+
+
+def now():
+    n = os.environ.get("TG_CMD_NOW")
+    return datetime.strptime(n, "%Y-%m-%d %H:%M") if n else datetime.now(TZ).replace(tzinfo=None)
+
+
+def run(args, timeout, what, full=False):
+    """stdout of BIN/args[0] ...; raises Fail on timeout or non-zero exit. Own process group,
+    killed whole on timeout (ssh children too). full: (exit code, stdout, stderr), any exit code."""
+    env = {**os.environ, "TZ": "Europe/Zurich"}
+    env.pop("TELEGRAM_BOT_TOKEN", None)
+    try:
+        p = subprocess.Popen([os.path.join(BIN, args[0]), *args[1:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             stdin=subprocess.DEVNULL, env=env, start_new_session=True, text=True)
+    except OSError as e:
+        raise Fail(f"{what}: {args[0]} not runnable ({type(e).__name__})")
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        raise Fail(f"{what}: no answer within {timeout} s")
+    if full:
+        return p.returncode, out, err
+    if p.returncode != 0:
+        last = next((l for l in reversed(err.strip().splitlines()) if l.strip()), "")
+        last = re.sub(r"^[\w-]+: ", "", last.strip())[:120]
+        raise Fail(f"{what}: {last or f'exit {p.returncode}'}")
+    return out
+
+
+# ---------------------------------------------------------------- formatting helpers
+
+def day_txt(d, with_weekday=True):
+    """'today', 'tomorrow', 'Fri 16.10' (year added when it's not this year)."""
+    t = now().date()
+    if d == t:
+        return "today"
+    if d == t + timedelta(days=1):
+        return "tomorrow"
+    s = d.strftime("%d.%m") if d.year == t.year else d.strftime("%d.%m.%Y")
+    return f"{d:%a} {s}" if with_weekday else s
+
+
+def money(cur, amt):
+    try:
+        return f"{cur} {Decimal(str(amt)):,.2f}".replace(",", "'")
+    except InvalidOperation:
+        return f"{cur} {amt}"
+
+
+def size(b):
+    if b >= 1e12:
+        return f"{b / 1e12:.1f} TB"
+    if b >= 1e9:
+        return f"{b / 1e9:.0f} GB"
+    return f"{b / 1e6:.0f} MB"
+
+
+def clip(s, n):
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[: n - 1].rstrip() + "…"
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_bills():
+    bills = json.loads(run(["bills", "list", "--open", "--json"], 6, "bill tracker") or "[]")
+    if not bills:
+        return "💳 No open bills."
+    bills.sort(key=lambda b: b["due"])
+    totals = {}
+    for b in bills:
+        try:
+            totals[b["currency"]] = totals.get(b["currency"], Decimal(0)) + Decimal(str(b["amount"]))
+        except InvalidOperation:
+            pass
+    head = f"💳 Open bills: {len(bills)} · " + " + ".join(money(c, a) for c, a in sorted(totals.items()))
+    lines, today = [head], now().date()
+    for b in bills[:12]:
+        due = date.fromisoformat(b["due"])
+        what = f"{clip(b['payee'], 28)} · {money(b['currency'], b['amount'])}"
+        days = (due - today).days
+        if days < 0:
+            lines.append(f"⚠️ {what} · OVERDUE since {day_txt(due)}")
+        elif days == 0:
+            lines.append(f"❗ {what} · due today")
+        else:
+            lines.append(f"• {day_txt(due)} · {what}" + (f" (in {days} d)" if days <= 14 else ""))
+    if len(bills) > 12:
+        lines.append(f"+ {len(bills) - 12} more")
+    return "\n".join(lines)
+
+
+def cmd_queue():
+    out = run(["media", "queue"], 12, "Sonarr/Radarr").strip()
+    if not out or out == "nothing downloading":
+        return "📥 Nothing downloading."
+    lines, items = ["📥 Downloads"], 0
+    for l in out.splitlines():
+        if not l.strip():
+            continue
+        if l.startswith("Movies ("):
+            lines.append("🎬 " + l.rstrip(":"))
+        elif l.startswith("TV ("):
+            lines.append("📺 " + l.rstrip(":"))
+        else:
+            items += 1
+            if items <= 20:
+                lines.append("• " + clip(l.strip().replace(" -- ", " · "), 160))
+    if items > 20:
+        lines.append(f"+ {items - 20} more")
+    return "\n".join(lines)
+
+
+def cmd_space():
+    note = ""
+    try:
+        r = json.loads(run(["unraid-capacity", "forecast", "--live"], 10, "live reading"))
+    except (Fail, ValueError) as e:
+        r = json.loads(run(["unraid-capacity", "forecast"], 5, "capacity history"))
+        note = f"\n⚠️ {e}; showing the last daily sample"
+    if not r.get("ok", True) or "array" not in r:
+        raise Fail("capacity data incomplete")
+    a = r["array"]
+    age = "" if r.get("sample_age_h", 0) < 1 else f" (sample {r['sample_age_h']:.0f} h old)"
+    lines = [f"💾 Server space · {r.get('as_of_local', '?')[-5:]}{age}", ""]
+    filled = round(a["pct"] / 10)
+    lines += [f"Array {a['pct']:.0f}% full", "▓" * filled + "░" * (10 - filled),
+              f"{size(a['free'])} free of {size(a['size'])}"]
+    eta, rate = a.get("eta") or {}, (r.get("model") or {}).get("rate")
+    alerts = r.get("alerts") or []
+    array_alert = any(al.get("key") == "array" for al in alerts)
+    if eta.get("date"):
+        d = date.fromisoformat(eta["date"])
+        lines += ["", ("⚠️ " if array_alert else "") + f"Full in ~{eta['days']:.0f} days ({d:%d %b})"]
+        if rate:
+            lines.append(f"Growing ~{size(rate)}/day")
+    elif rate is not None and rate <= 0:
+        lines += ["", "Not growing at the moment"]
+    # owner: array total only, no per-disk fill levels; a disk with a bad status still shows
+    disks = (r.get("disks") or {}).items()
+    bad = [f"{n} {d['status']}" for n, d in disks if d.get("size") and d.get("status") and d["status"] != "DISK_OK"]
+    if bad:
+        lines += ["", "⚠️ Disk status: " + ", ".join(bad)]
+    pools = r.get("pools") or {}
+    if pools:
+        lines += ["", "Pools"] + [f"• {n} {p['pct']:.0f}% · {size(p['free'])} free" for n, p in pools.items()]
+    extra = [al for al in alerts if not (al.get("key") == "array" and eta.get("date"))]
+    if extra:
+        lines.append("")
+        lines += ["⚠️ " + clip(al.get("msg", str(al)), 160) for al in extra]
+    return "\n".join(lines) + note
+
+
+REM_RE = re.compile(r"^\s*\d+\.\s+(\d{4}-\d\d-\d\d \d\d:\d\d)\s+(\[owner\] )?(.*)$")
+
+
+def short_title(text):
+    """One skimmable line: drop the due-date tail and the explanation after a dash/paren/period."""
+    t = re.sub(r":\s+\w{3} \d{1,2} \w{3}(?: \d{4})? \((?:in \d+ days?|today|tomorrow)\)\..*$", "", text)
+    for sep in (" — ", " – ", ". ", " (Via", " (in "):
+        i = t.find(sep)
+        if i > 15:
+            t = t[:i]
+    t = t.rstrip(" .:")
+    return clip(t, 60)
+
+
+def cmd_reminders():
+    mine, others = [], 0
+    for l in run(["remind", "list"], 6, "reminders").splitlines():
+        m = REM_RE.match(l)
+        if not m:
+            continue
+        if not m.group(2):
+            others += 1
+            continue
+        text = re.sub(r"  \(tag [^)]*\)$", "", m.group(3))
+        series = re.search(r"  \((every [^)]*)\)$", text)
+        if series:
+            text = text[: series.start()]
+        mine.append((datetime.strptime(m.group(1), "%Y-%m-%d %H:%M"), text, series.group(1) if series else ""))
+    tail = f"\n+ {others} follow-up{'s' if others != 1 else ''} of my own (not listed)" if others else ""
+    if not mine:
+        return '⏰ No reminders set. Say "remind me …" to add one.' + tail
+    shown = mine[:10]
+    lines = ["⏰ Your reminders" + (f" (next 10 of {len(mine)})" if len(mine) > 10 else "")]
+    month = None
+    for at, text, series in shown:
+        mlabel = at.strftime("%B %Y") if at.year != datetime.now().year else at.strftime("%B")
+        if mlabel != month:
+            month = mlabel
+            lines += ["", mlabel]
+        lines.append(f"{at:%a %d}  {at:%H:%M}  {short_title(text)}" + (f"  🔁 {series}" if series else ""))
+    lines += ["", "Ask me for details on any of them."] if shown else []
+    return "\n".join(lines) + tail
+
+
+# /home: strictly read-only. One `ha list --json` (REST GET, already privacy-gated by ha), the latest
+# ha-health-watch snapshot file, and ha_privacy.text_gate over the whole answer.
+NO_INFO_DOMAINS = {"person", "device_tracker", "zone", "proximity", "geo_location"}  # dropped unread
+LOW_BATTERY = 15.0  # % (= ha-health-watch)
+DOWN = ("unavailable", "unknown", "<hidden>", "", "None")
+OUTDOOR_RE = re.compile(r"balcon|terrace|terrasse|patio|garden|garten|yard|outdoor|outside|aussen|roof|veranda", re.I)
+TEMP_SKIP_RE = re.compile(r"cpu|chip|processor|internal|board|nvme|disk|gpu|\bsoc\b|battery|nozzle|printer|"
+                          r"fridge|freezer|water|device temp", re.I)
+VACUUM_STATE = {"docked": "docked", "cleaning": "cleaning", "returning": "returning to the dock", "idle": "idle",
+                "paused": "paused", "error": "⚠️ error", "unavailable": "unavailable", "unknown": "unknown"}
+
+
+def ha_privacy():
+    """~/bin/lib/ha_privacy (next to this script, else ~/bin/lib); missing = Fail (fail closed)."""
+    here = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib")
+    for d in (here, os.path.expanduser("~/bin/lib")):
+        if os.path.isfile(os.path.join(d, "ha_privacy.py")):
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import ha_privacy
+            return ha_privacy
+    raise Fail("privacy gate (ha_privacy) not found")
+
+
+def gate(s):
+    """ha_privacy.text_gate; applied before any clip() so a cut never splits a value the gate would mask."""
+    return ha_privacy().text_gate(s)
+
+
+def fnum(v):
+    try:
+        f = float(v)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def home_rows():
+    """`ha list --json` -> {entity_id: row}, location/person/tracker domains dropped before anything reads them."""
+    try:
+        rows = json.loads(run(["ha", "list", "--json", "--limit", "5000"], 10, "Home Assistant") or "[]")
+    except ValueError:
+        raise Fail("Home Assistant: unreadable answer")
+    if not isinstance(rows, list):
+        raise Fail("Home Assistant: unexpected answer")
+    out = {}
+    for r in rows:
+        eid = str((r or {}).get("entity_id") or "") if isinstance(r, dict) else ""
+        if "." not in eid or eid.split(".", 1)[0] in NO_INFO_DOMAINS:
+            continue
+        r["attributes"] = r.get("attributes") if isinstance(r.get("attributes"), dict) else {}
+        r["state"] = str(r.get("state"))
+        out[eid] = r
+    return out
+
+
+def dom(eid):
+    return eid.split(".", 1)[0]
+
+
+def nice_name(r, strip=()):
+    n = str(r.get("name") or r["entity_id"].split(".", 1)[1].replace("_", " "))
+    for s in strip:
+        n = re.sub(rf"\s*{s}$", "", n, flags=re.I)
+    return clip(gate(n), 30)
+
+
+def home_lights(R):
+    lights = {e: r for e, r in R.items() if dom(e) == "light"}
+    on = []
+    for e, r in lights.items():
+        if r["state"] != "on":
+            continue
+        members = r["attributes"].get("entity_id")
+        if isinstance(members, list) and any(m in lights for m in members):
+            continue  # a light group: its member bulbs are counted
+        on.append(r)
+    if not on:
+        return "💡 All lights off"
+    rooms = {}
+    for r in on:
+        a = r.get("area") or "no room"
+        rooms[a] = rooms.get(a, 0) + 1
+    order = sorted(rooms.items(), key=lambda x: (-x[1], x[0] == "no room", x[0]))
+    return f"💡 {len(on)} light{'s' if len(on) != 1 else ''} on · " + ", ".join(
+        f"{a} {n}" if len(rooms) > 1 else a for a, n in order)
+
+
+def home_temps(R):
+    per = {}  # area -> (rank, text)
+    for e, r in R.items():
+        a, area = r["attributes"], r.get("area")
+        if not area:
+            continue
+        if dom(e) == "climate":
+            cur = fnum(a.get("current_temperature"))
+            if cur is None:
+                continue
+            t, txt = fnum(a.get("temperature")), f"{area} {cur:.1f}°"
+            if t is not None and r["state"] not in ("off",) + DOWN:
+                txt += f"→{t:g}°"
+            if a.get("hvac_action") == "heating":
+                txt += "🔥"
+            elif a.get("hvac_action") == "cooling":
+                txt += "❄️"
+            rank = (0, e)
+        elif dom(e) == "sensor" and a.get("device_class") == "temperature":
+            v = fnum(r["state"])
+            if v is None or TEMP_SKIP_RE.search(f"{e} {r.get('name') or ''}"):
+                continue
+            unit = str(a.get("unit_of_measurement") or "°C")
+            if unit not in ("°C", "°F"):
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "_", area.lower()).strip("_")
+            rank = (1 if e == f"sensor.{slug}_temperature" else 2, e)
+            txt = f"{area} {v:.1f}°" + ("F" if unit == "°F" else "")
+        else:
+            continue
+        if area not in per or rank < per[area][0]:
+            per[area] = (rank, txt)
+    if not per:
+        return None
+    order = sorted(per, key=lambda x: (bool(OUTDOOR_RE.search(x)), x.lower()))
+    return "🌡 " + " · ".join(per[a][1] for a in order)
+
+
+def home_vacuums(R):
+    vacs = sorted(e for e in R if dom(e) == "vacuum")
+    out = []
+    for e in vacs:
+        r = R[e]
+        st = VACUUM_STATE.get(r["state"], r["state"].replace("_", " "))
+        bat = fnum(r["attributes"].get("battery_level"))
+        if bat is None:
+            s = R.get(f"sensor.{e.split('.', 1)[1]}_battery")
+            bat = fnum(s["state"]) if s else None
+        who = nice_name(r) if len(vacs) > 1 else "Vacuum"
+        out.append(f"{who}: {st}" + (f" · {bat:.0f}%" if bat is not None and r["state"] not in DOWN else ""))
+    return ("🧹 " + "; ".join(out)) if out else None
+
+
+def home_media(R):
+    seen, out = set(), []
+    for e in sorted(R):
+        r = R[e]
+        if dom(e) != "media_player" or r["state"] not in ("playing", "on"):
+            continue
+        a = r["attributes"]
+        grp = a.get("group_members")
+        if isinstance(grp, list) and len(grp) > 1 and grp[0] != e and grp[0] in R:
+            continue  # a speaker grouped under another one: the group leader is shown
+        name = nice_name(r)
+        if name in seen:
+            continue
+        seen.add(name)
+        what = gate(next((str(a[k]) for k in ("app_name", "source", "media_title") if a.get(k)), ""))
+        if r["state"] == "on":
+            out.append(f"{name} on" + (f" ({clip(what, 24)})" if what else ""))
+        else:
+            out.append(name + (f" ({clip(what, 24)})" if what else ""))
+    if not out:
+        return "🎵 Nothing playing"
+    more = f" +{len(out) - 3}" if len(out) > 3 else ""
+    return "🎵 Playing: " + " · ".join(out[:3]) + more
+
+
+def home_batteries(R):
+    ids = set(R)
+    phones = {e[: -len("_battery_level")] for e in ids
+              if e.endswith("_battery_level") and e[: -len("_level")] + "_state" in ids}
+    vacs = {"sensor." + e.split(".", 1)[1] for e in ids if dom(e) == "vacuum"}
+    low = []
+    for e in sorted(ids):
+        r = R[e]
+        if r["attributes"].get("device_class") != "battery" or dom(e) not in ("sensor", "binary_sensor"):
+            continue
+        if any(e.startswith(p + "_battery") for p in phones) or any(e.startswith(v + "_") for v in vacs):
+            continue  # phones (person data) and vacuums (they charge themselves) are left out
+        name = nice_name(r, strip=("battery level", "battery"))
+        if dom(e) == "binary_sensor":
+            if r["state"] == "on":
+                low.append((-1.0, f"{name} low"))
+            continue
+        v = fnum(r["state"])
+        if v is not None and str(r["attributes"].get("unit_of_measurement") or "%") == "%" and v < LOW_BATTERY:
+            low.append((v, f"{name} {v:.0f}%"))
+    if not low:
+        return "🔋 Batteries ok"
+    low.sort()
+    more = f" +{len(low) - 4}" if len(low) > 4 else ""
+    return "🔋 Low: " + ", ".join(t for _, t in low[:4]) + more
+
+
+def health_snaps():
+    """(latest, previous) valid ha-health-watch snapshots (dicts with 'findings'), either may be None."""
+    try:
+        names = sorted(n for n in os.listdir(HEALTH_DIR) if re.fullmatch(r"snap-\d{8}-\d{6}\.json", n))
+    except OSError:
+        return None, None
+    got = []
+    for n in reversed(names):
+        try:
+            with open(os.path.join(HEALTH_DIR, n)) as f:
+                s = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(s, dict) and isinstance(s.get("findings"), dict):
+            got.append(s)
+            if len(got) == 2:
+                break
+    return (got + [None, None])[0], (got + [None, None])[1]
+
+
+def health_label(k, f, R):
+    lab, area = str(f.get("label") or k), str(f.get("area") or "")
+    if f.get("kind") == "ent" and lab in R:
+        lab = nice_name(R[lab])
+    elif f.get("kind") in ("issue", "sup"):
+        lab = lab.replace("_", " ")
+    if area and f.get("kind") in ("dev", "ent") and area.lower() not in lab.lower():
+        lab = f"{area} {lab}"
+    return clip(gate(lab), 32)
+
+
+def home_health(R):
+    cur, prev = health_snaps()
+    if cur is None:
+        return ["🩺 HA health: no ha-health-watch snapshot yet"]
+    F = {k: f for k, f in cur["findings"].items() if isinstance(f, dict) and f.get("kind") != "bat"}
+    known = sum(1 for f in F.values() if f.get("known"))
+    opened = {k: f for k, f in F.items() if not f.get("known")}
+    prev_keys = set(prev["findings"]) if prev else set(F)  # first snapshot = baseline: nothing is new
+    new = sorted(k for k in opened if k not in prev_keys)
+    age = ""
+    try:
+        taken = datetime.fromisoformat(str(cur.get("taken"))).astimezone(TZ).replace(tzinfo=None)
+        h = (now() - taken).total_seconds() / 3600
+        if h >= 36:
+            age = f" (snapshot {h / 24:.0f} d old)"
+    except (TypeError, ValueError):
+        age = " (snapshot time unknown)"
+    try:
+        with open(os.path.join(HEALTH_DIR, "state.json")) as f:
+            if (json.load(f) or {}).get("fail_streak"):
+                age += " · watch failing"
+    except (OSError, ValueError, AttributeError):
+        pass
+    kn = f" · {known} known offline" if known else ""
+    if not opened:
+        return [f"🩺 HA health: all ok{kn}{age}"]
+    lines = [f"🩺 HA health: {len(opened)} open" + (f" ({len(new)} new)" if new else "") + kn + age]
+    order = new + sorted((k for k in opened if k not in new),
+                         key=lambda k: (["dev", "ent", "int", "issue", "sup"].index(opened[k].get("kind"))
+                                        if opened[k].get("kind") in ("dev", "ent", "int", "issue", "sup") else 9, k))
+    labels = [health_label(k, opened[k], R) + (" 🆕" if k in new else "") for k in order]
+    more = f", +{len(labels) - 3} more" if len(labels) > 3 else ""
+    return lines + ["↳ " + ", ".join(labels[:3]) + more]
+
+
+def cmd_home():
+    gate("")  # no privacy gate = no answer
+    try:
+        R = home_rows()
+    except Fail as e:
+        raise Fail(gate(str(e)))
+    lines = [f"🏠 Home · {now():%H:%M}", home_lights(R)]
+    lines += [x for x in (home_temps(R), home_vacuums(R)) if x]
+    lines += [home_media(R)] + home_health(R) + [home_batteries(R)]
+    return "\n".join(gate(l) for l in lines)
+
+
+COMMANDS = {
+    "bills": ("Open and upcoming bills", cmd_bills),
+    "queue": ("What's downloading (Sonarr/Radarr)", cmd_queue),
+    "space": ("Server disk space and forecast", cmd_space),
+    "reminders": ("Your upcoming reminders", cmd_reminders),
+    "home": ("Home: lights, temperatures, media, HA health", cmd_home),
+}
+FALLBACK_HINT = {
+    "bills": "bills", "queue": "what's downloading", "space": "how much space is left",
+    "reminders": "what reminders do I have", "home": "what's on at home",
+}
+
+
+def redact(text):
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import secretscan
+        return secretscan.redact(text)
+    except Exception:
+        return text
+
+
+def finish(text):
+    text = redact(text.strip())
+    if len(text) > MAX_CHARS:
+        text = text[: MAX_CHARS - 2].rstrip() + "\n…"
+    print(text)
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if len(argv) == 2 else 2
+    name, args = argv[1], argv[2:]
+    if args:
+        print(f"tg-cmd: commands take no arguments; got {' '.join(argv[1:])!r}", file=sys.stderr)
+        return 2
+    if name == "--list":
+        for n, (desc, _) in COMMANDS.items():
+            print(f"/{n:<10} {desc}")
+        return 0
+    if name == "--instant-json":
+        print(json.dumps([{"command": n, "description": d, "run": f"~/bin/tg-cmd {n}"}
+                          for n, (d, _) in COMMANDS.items()], indent=2, ensure_ascii=False))
+        return 0
+    if name.lstrip("/") not in COMMANDS:
+        print(f"tg-cmd: unknown command {name!r} (known: {', '.join(COMMANDS)})", file=sys.stderr)
+        return 2
+    name = name.lstrip("/")
+    try:
+        finish(COMMANDS[name][1](*args))
+        return 0
+    except Fail as e:
+        finish(f"⚠️ /{name} failed: {e}.\nAsk me in a normal message (\"{FALLBACK_HINT[name]}?\") and I'll look.")
+    except Exception as e:  # a bug here must still give the owner a sensible answer
+        finish(f"⚠️ /{name} failed ({type(e).__name__}).\nAsk me in a normal message (\"{FALLBACK_HINT[name]}?\") and I'll look.")
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

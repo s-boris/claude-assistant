@@ -1,0 +1,228 @@
+# The bot's own crontab. entrypoint installs it at boot; after editing run: crontab ~/crontab
+MAILTO=""
+PATH=/home/node/bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Pinned Telegram status board: re-render it, and turn a stale "working" (no hook activity for 10 min) into idle.
+*/5 * * * * /home/node/bin/tg-status refresh >/dev/null 2>&1
+
+# Weekly digest for the owner (Sunday afternoon, Zurich time): drop a note; the heartbeat runs the weekly-digest subagent.
+3 15 * * 0 echo "Weekly digest due $(date +\%F). Run the weekly-digest subagent (effort xhigh), review it, send it as one rich Telegram message." > /home/node/inbox/digest-$(date +\%s).md
+
+# Hardware-error trend (~/bin/hwtrend, read-only, reuses unraid-health's collector): one sample/day in
+# ~/.local/state/hwtrend/; ~/inbox note only when a SMART/btrfs/array error counter goes up or a temp is hot 2 days running.
+7 8 * * * /home/node/bin/hwtrend >> /home/node/.local/state/hwtrend/cron.log 2>&1
+
+# CPU heat logger (~/bin/cputemp-log, 2026-10-16, fix 0 of ~/reports/unraid/cpu-heat-2026-10-16.md; read-only, no
+# tokens): keep its loop alive (flock; one persistent ssh session reading /sys). 10 s in the vault job windows, else 60 s;
+# daily CSV in ~/.local/state/cputemp/ (14 days). `cputemp-log summary [day]`.
+*/5 * * * * /home/node/bin/cputemp-log ensure >/dev/null 2>> /home/node/.local/state/cputemp/cron.err
+
+# Unraid health check (strictly read-only, one `ssh unraid` session): silent unless something new needs
+# attention, then a short `tg` text to the owner + a note in ~/inbox. Details: unraid-health --help
+13 8 * * * /home/node/bin/unraid-health >> /home/node/.local/state/unraid-health/cron.log 2>&1
+
+# Durable reminders (~/bin/remind): move due ones into ~/inbox for the next heartbeat.
+* * * * * /home/node/bin/remind due >/dev/null 2>&1
+
+# Weekly birthday check, Mondays 09:07: drop a note; the heartbeat checks the calendar for birthdays in the next 7 days and messages the owner only if there are any.
+7 9 * * 1 echo "Weekly birthday check $(date +\%F): look up birthdays in the owner's Google Calendar for the next 7 days (contacts' birthdays and the people-and-dates memory). If any, send ONE short message listing them with a gift idea for close people. If none, stay silent. Then the calendar gap pass: list events in the next 60 days with no description and no location; enrich the obviously public ones (concerts, raves, festivals, games: venue address, doors/start, headliner, ticket status, last train home to the owner's home as a weekday estimate) as a Details block + location, notificationLevel NONE, never change times/titles; skip private/personal events (memory calendar-enrichment); no message." > /home/node/inbox/birthdays-$(date +\%s).md
+# Gift radar (~/bin/gift-radar, token-free): 10 days before a birthday in the people-and-dates memory, interest facts via the
+# vault (anonymized) + local LLM -> ONE ~/inbox/gift-radar-<name>.md note; I research 3 ideas (WebSearch) and message the owner.
+23 9 * * * /home/node/bin/gift-radar run --cron >> /home/node/.local/state/gift-radar.log 2>&1
+
+# Telegram watchdog (no tokens): channel not delivered, poller down, stalled/unanswered owner messages, dialogs.
+# One owner notice per incident, ~/inbox notes, rate-limited auto-restarts. Details: channel-check --help
+* * * * * /home/node/bin/channel-check >/dev/null 2>&1
+
+# Subagent watchdog (~/bin/agent-watch, no tokens, transcript metadata only; replaces the in-session CronCreate
+# check-in). ONE ~/inbox note per stalled agent (>15 min without transcript growth); agents tagged owner-facing
+# (`agent-watch tag ID owner "title"`) get "⏳ title: still working (N min)" via tg every ~15 min, 08:00-24:00 only.
+*/5 * * * * mkdir -p /home/node/.local/state/agent-watch && /home/node/bin/agent-watch run >/dev/null 2>> /home/node/.local/state/agent-watch/cron.err
+
+# Unraid OS update watch: texts the owner once per new stable release.
+27 9 * * * /home/node/bin/unraid-update-check >/dev/null 2>&1
+
+# Warm whisper-server for ~/bin/transcribe (127.0.0.1:8178, model preloaded): start it if it isn't answering.
+*/5 * * * * /home/node/bin/whisper-server-ctl ensure >/dev/null 2>&1
+# Local LLM for private data (~/bin/llm-local; llama-server 127.0.0.1:8179): start it if it isn't answering (not after a
+# deliberate `llm-server-ctl stop`; refuses when RAM is short).
+# moved to claude-vault 2026-10-10: */5 * * * * /home/node/bin/llm-server-ctl ensure >/dev/null 2>&1
+# Idle auto-stop of that rollback server (2026-10-16): llm-local starts it on demand; stop it after 30 min without a
+# request (server.log mtime / open connections; log ~/.cache/llm-local/idle.log). Sets the same flag as `stop`.
+*/5 * * * * /home/node/bin/llm-server-ctl idle-check >/dev/null 2>&1
+
+# Telegram attachments (photos, files) older than 7 days.
+41 4 * * * find /home/node/.claude/channels/telegram/inbox -type f -mtime +7 -delete 2>/dev/null
+
+# Unraid capacity forecast (~/bin/unraid-capacity, strictly read-only: one ssh session, emhttp RAM files + df,
+# wakes no disk). Daily sample at 03:17 (before the 03:40 mover); weekly forecast Monday 09:13, silent unless the
+# array is projected full within 60 days or a pool/docker.img within 14: then `tg` + ~/inbox note, once per band.
+17 3 * * * /home/node/bin/unraid-capacity record >> /home/node/.local/state/unraid-capacity/cron.log 2>&1
+13 9 * * 1 /home/node/bin/unraid-capacity forecast --alert --notify >> /home/node/.local/state/unraid-capacity/cron.log 2>&1
+
+# HA backups -> Unraid (~/bin/ha-backup-pull): HA makes an automatic backup daily 03:15 (keeps 7);
+# this copies new ones (GET-only on HA) to ~/backups/ha/ (SSH lockdown; /mnt/user/backup/ha/ via ssh only in root mode),
+# verifies size + sha256 + tar, keeps 14.
+# Silent when fine; ~/inbox note on failure or when HA has no completed automatic backup for 36 h.
+5 4 * * * mkdir -p /home/node/.local/state/ha-backup-pull && /home/node/bin/ha-backup-pull >> /home/node/.local/state/ha-backup-pull/cron.log 2>&1
+
+# HA health watch (~/bin/ha-health-watch, read-only: ha-audit + `ha list`, no tokens): diffs against the previous
+# snapshot in ~/.local/state/ha/health/; ONE ~/inbox note only for NEW dead devices/entities, batteries < 15 %,
+# repair issues or failed integrations (known-offline list ~/.config/ha-health-watch/known.json). Silent when fine.
+40 7 * * * mkdir -p /home/node/.local/state/ha/health && /home/node/bin/ha-health-watch --cron >> /home/node/.local/state/ha/health/cron.log 2>&1
+
+# Bills: the Monday "to pay this week" list (only if non-empty).
+47 8 * * 1 out=$(/home/node/bin/bills week 2>/dev/null); [ -n "$out" ] && /usr/local/bin/tg "$out"
+# Bills from paperless (~/bin/bills scan-paperless; read-only on paperless, through the privacy vault): documents added
+# since the last scan → likely bills (QR code / bill words + the vault's whitelisted fields) → `bills add` with reminders.
+# Silent unless bills were added: then ONE ~/inbox note (tell the owner in one short message). 3 failed runs → one note.
+41 8 * * * /home/node/bin/bills scan-paperless --cron >> /home/node/.local/state/bills/paperless-scan.log 2>&1
+
+# Weekly paperless Inbox review (~/bin/paperless-inbox-review; via the privacy vault, read-only here): documents with
+# the Inbox tag or no tags -> suggested type/correspondent/tags (keywords + local LLM). ONE ~/inbox note only when
+# something needs review: send the owner one message with pinb:ok/pinb:skip buttons; apply only after his press.
+7 16 * * 0 mkdir -p /home/node/.local/state/paperless-inbox && /home/node/bin/paperless-inbox-review --cron >> /home/node/.local/state/paperless-inbox/cron.log 2>&1
+
+# Container updates & security advisories (~/bin/container-watch, strictly read-only on the server: one ssh session
+# reads docker metadata + Unraid's update status; versions from the apps' own GET endpoints; GitHub releases/advisories
+# + NVD, cached). Weekly Wed 19:13: silent unless an advisory affects an installed version, a security fix is overdue,
+# or an Unraid update has been pending 30+ days; then ONE short `tg` + ~/inbox note, once per item. Never updates anything.
+13 19 * * 3 /home/node/bin/container-watch --notify --max-age 1d >> /home/node/.local/state/container-watch/cron.log 2>&1
+
+# Versioned brain (~/bin/brain): snapshot my config/memory into ~/.brain.git every 30 min if anything changed.
+# Silent; if secretscan blocks a commit, ONE ~/inbox note per distinct problem. Manual: brain-commit "msg".
+11,41 * * * * /home/node/bin/brain auto >/dev/null 2>&1
+
+# Web watches (~/bin/watch): due price/feed/page/release/json watches, polite (robots.txt, 15 min per host, backoff).
+# Owner watches text via tg once per event; mine land in ~/inbox; 5 failures disable a watch (+ inbox note).
+*/15 * * * * /home/node/bin/watch run >> /home/node/.local/state/watch/cron.log 2>&1
+# AI release alerts (~/bin/ai-releases, as soon as possible): lab feeds, model pages,
+# HN, HF -> regex filter -> local-LLM judge -> one tg per major release; 00-08 queued to 08:00; max 6/day. No tokens.
+*/15 * * * * mkdir -p /home/node/.local/state/ai-releases && /home/node/bin/ai-releases run >> /home/node/.local/state/ai-releases/cron.log 2>&1
+
+# Deadline radar (~/bin/deadlines): roll owner reminders forward monthly (idempotent, tags deadline:*).
+# Enabled 2026-10-10 after review (8 reminders synced through 2027-04).
+23 9 1 * * /home/node/bin/deadlines sync --quiet >> /home/node/.local/state/deadlines-cron.log 2>&1
+# Missing paperless documents (~/bin/missing-docs; metadata only, via the privacy vault; expectations in
+# ~/.config/missing-docs/expected.json). Silent unless something is overdue > 14 days: then ONE ~/inbox note
+# (one short Telegram message with Filed / Not needed / Remind me buttons). A failed run writes one error note.
+23 9 3 * * /home/node/bin/missing-docs --cron >> /home/node/.local/state/missing-docs/cron.log 2>&1
+
+
+
+# self-review (Hermes idea 3): reviews yesterday's brain diff of my skills/agents/memory/CLAUDE.md
+# (contradictions, missing scripts/flags, privacy leaks, MEMORY.md drift, CLAUDE.md growth; local LLM in the vault).
+# Report ~/reports/self-review/; ONE ~/inbox note only for new findings. Never edits. Before brain-backup.
+30 3 * * * /home/node/bin/self-review --cron >> /home/node/.local/state/self-review/cron.log 2>&1
+# Nightly backup of my setup to Unraid /mnt/user/backup/claude-bot, 14 days kept. Failure → inbox note.
+47 3 * * * /home/node/bin/brain-backup >> /home/node/.local/state/brain-backup.log 2>&1
+# Monthly test-restore of the newest backup into a temp dir (brain-backup --verify): ~/inbox note only on failure.
+17 4 1 * * /home/node/bin/brain-backup --verify --cron >> /home/node/.local/state/brain-backup.log 2>&1
+
+# "🎬 X is ready" pings (~/bin/media ready-watch; GET-only on Seerr/Sonarr, no tokens): texts the owner once per title
+# when one of HIS Seerr requests (profile services.seerr_user) is available on Emby, and new episodes of shows he requested, batched
+# per show per run. Quiet hours 00-08 hold pings until 08:00. Silent otherwise; 3 h of failures -> one ~/inbox note.
+# State + log: ~/.local/state/media-ready (media ready-watch --status). Seerr's own Telegram agent only posts to a group.
+# Re-enabled 2026-10-13: only HIS Seerr requests (profile services.seerr_user).
+*/10 * * * * mkdir -p /home/node/.local/state/media-ready && /home/node/bin/media ready-watch >> /home/node/.local/state/media-ready/cron.log 2>&1
+
+
+
+# Headed browser (~/bin/browser: Chrome on Xvfb :99, CDP 127.0.0.1:9222 for the "browser" MCP). Restart it if Chrome/Xvfb
+# died (not after a deliberate `browser stop`), and a daily Chrome security update (it runs --no-sandbox in this
+# container, so staying patched matters); a running Chrome is restarted only if the version changed. No tokens.
+*/5 * * * * /home/node/bin/browser ensure >/dev/null 2>&1
+# flowd watchdog (dash.<domain>/live): restarts the SSE server and its ssh tunnel when down or hung; silent; `flowd off` = kill switch
+* * * * * /home/node/bin/flowd ensure >/dev/null 2>&1
+23 4 * * * /home/node/bin/browser update >> /home/node/.local/state/browser/update.log 2>&1
+
+# Swiss deal hunter (~/bin/deals, idea #11): daily big-HDD price snapshot from Alternate.ch + MediaMarkt.ch (~7 polite
+# GETs, robots.txt honoured, bot-protected shops never touched). History is recorded silently in ~/.local/state/deals;
+# an ~/inbox note only when a new NAS/enterprise drive ≥18 TB drops below the CHF/TB threshold (`deals threshold`, set
+# 2026-10-10 to the p10 = 35.70) or a source stays broken 3 runs. Never buys anything.
+53 8 * * * mkdir -p /home/node/.local/state/deals && /home/node/bin/deals hdd --cron >> /home/node/.local/state/deals/cron.log 2>&1
+
+# readlater (~/bin/readlater, the text extractor behind link summaries; skill link-summary): keep yt-dlp current, since YouTube breaks old versions. Weekly Mon 05:29 pip upgrade in its venv;
+# logs only version changes; if the new version doesn't run it rolls back and drops ONE ~/inbox note. No tokens.
+29 5 * * 1 mkdir -p /home/node/.local/state/readlater && /home/node/bin/readlater update --quiet >> /home/node/.local/state/readlater/update.log 2>&1
+
+# Privacy vault (claude-vault on Unraid, skill vault). tgread runs INSIDE the vault now and
+# the vault syncs Telegram itself every 15 min once logged in (no tgread cron here any more). Its problems (sync
+# failing 3x, LLM down, not logged in) become alerts; this copies them into ~/inbox (vault-*/tgread-*.md) and drops ONE
+# note when the vault is unreachable 3 checks in a row. Silent otherwise. No tokens.
+*/15 * * * * /home/node/bin/vault alerts --to-inbox --cron >/dev/null 2>&1
+# Live event feed (lockdown plan E, 2026-10-13): new incoming Telegram messages (Gmail next), triaged + anonymized
+# in the vault; ONE ~/inbox note (vault-events-*.md, 0600) only when something is actionable. No tokens.
+* * * * * /home/node/bin/vault-events --cron >/dev/null 2>&1
+# Goal loop (more proactive, long-term goal oriented; GOALS.md drives the heartbeat).
+# Environment snapshot (~/bin/context, no tokens, every source fails soft): HN picks, server, weather, next 7 days,
+# flags only since privacy plan C (14.10): home/away/far (HA person entity), Telegram digest counts + needs-you flags +
+# plan dates, signal categories -> context/signals.json (no text, no place names). 08:25 and 18:25.
+25 8,18 * * * mkdir -p /home/node/.local/state/context && /home/node/bin/context >> /home/node/.local/state/context/cron.log 2>&1
+# Weekly idea scan, Sunday 18:47: note -> heartbeat runs the idea-scan subagent and refills TODO.md Ideas.
+47 18 * * 0 echo "Weekly idea scan $(date +\%F): read ~/.local/state/context/today.md and the next 7 days of Google Calendar first (pass the agent a short calendar digest), then run the idea-scan subagent (effort high; it also reads the signal categories in context/signals.json; flags and categories only, no chat text). Merge the best new items into TODO.md Ideas (keep >= 10), update GOALS.md steps, and add new goals or PROBLEMS.md entries the signals support." > /home/node/inbox/idea-scan-$(date +\%s).md
+# Daily plan, 08:31: note -> heartbeat picks today's GOALS.md steps and starts the first. Silent.
+31 8 * * * echo "Daily plan $(date +\%F): read ~/.local/state/context/today.md (flags) + context/signals.json (signal categories) + \`vault plans --days 7\` and the next 7 days of Google Calendar first; turn new signals into GOALS.md steps / PROBLEMS.md entries; then pick today's 1–3 GOALS.md steps, write them as In progress/Due in TODO.md, start the first; also enrich events in the next 14 days that lack a location or details (ask the vault first, notificationLevel NONE; memory calendar-enrichment); no message to the owner." > /home/node/inbox/daily-plan-$(date +\%s).md
+# Evening work summary, 21:07 (~/bin/dayline, no tokens, no message): today's PROACTIVE/CHANGELOG lines + agent runs -> dash dayline.json.
+7 21 * * * /home/node/bin/dayline >> /home/node/.local/state/dayline.log 2>&1
+
+# Dashboard: refresh data + copy to dash.<domain> (nginx VM)
+*/5 * * * * dash-publish >/dev/null 2>&1
+
+# recall (~/bin/recall, no tokens): nightly incremental refresh of the FTS5 index over my notes, reports, memory and
+# transcripts (secretscan-redacted; queries also refresh it when > 30 min old). ~/inbox note only on failure.
+31 3 * * * /home/node/bin/recall --index --cron >> /home/node/.local/state/recall/cron.log 2>&1
+
+# claude-vault source → private GitHub repo (profile repos.private_vault), nightly 03:41 (also after every vault admin deploy)
+41 3 * * * CRON=1 /home/node/bin/vault-git-sync >/dev/null 2>&1
+# codebase-sync: sanitized export of my code → private GitHub repo (profile repos.private_code), nightly 03:44 (also after brain-commit); blocked/failed → one ~/inbox note
+44 3 * * * /home/node/bin/codebase-sync --cron >/dev/null 2>&1
+# ci-nightly: local CI of both public trees (the public paths of the private repos copied as they are + every
+# privacy gate, then the full test suites incl. plugins), after the vault's night worker; E-cores, low priority;
+# quiet on success, a failure -> ONE ~/inbox note (ci-nightly-DATE.md)
+15 7 * * * /home/node/jobs/public-release/ci-nightly >/dev/null 2>&1
+# Waiting-on-you nudge (ask him from time to time about what waits for him): note → I ask 1-3 items
+40 18 * * 1-5 /home/node/bin/waiting-nudge --cron
+10 14 * * 0,6 /home/node/bin/waiting-nudge --cron
+# released vault media files: delete after their keep time (2 h max) and report it to the vault (2026-10-13)
+*/5 * * * * /home/node/bin/vault media gc --quiet >/dev/null 2>&1
+# Weekly self-cleanup (refactor me, remove features that are never used), Saturday 10:37
+37 10 * * 6 echo "Weekly self-cleanup $(date +\%F): run the self-cleanup subagent (effort xhigh). Then send the owner ONE short Telegram message: what was retired/simplified (one line each) and the 'Needs his OK' items as buttons (keep/retire). Report: ~/reports/cleanup/." > /home/node/inbox/self-cleanup-$(date +\%s).md
+# arr-unblock (automatic, only when the filename matches): Radarr/Sonarr queue items stuck in
+# "Manual Import required" are imported only when the *arr's own parser + manual-import preview verify every file (title/year/
+# episodes, no other rejections, quality, not a sample, size). Silent on success (~/.local/state/arr-unblock.log); ~/inbox note
+# once per skipped download (with `arr-unblock --approve svc:QUEUEID` when only the name check failed) or on a failure.
+4-59/15 * * * * mkdir -p /home/node/.local/state/arr-unblock && /home/node/bin/arr-unblock --cron >> /home/node/.local/state/arr-unblock/cron.log 2>&1
+# arr-mismatch (13.10, report ~/reports/unraid/indexer-misid-2026-10-13.md): READ-ONLY nightly check for Radarr library files that
+# are probably the wrong movie (release-name year via /api/v3/parse, title vs known titles, runtime). ONE ~/inbox note listing new
+# suspects only; silent otherwise. `arr-mismatch list` shows all, `arr-mismatch ack radarr:FILEID` silences one.
+37 4 * * * /home/node/bin/arr-mismatch --cron >> /home/node/.local/state/arr-mismatch.log 2>&1
+# arr-mismatch grabs (14.10): grab-time check, Radarr queue + grabs of the last 40 min whose release name is another
+# movie (indexer TMDB-ID mis-IDs); deduped by downloadId. AUTO-DROPS each one (owner-approved): queue DELETE +
+# blocklist, or mark the grab failed; already imported = note only; then interactive search + grab of a matching
+# approved release. Caps 3/movie/7 days, 10/run; log ~/.local/state/arr-mismatch-drops.log; ONE ~/inbox note per run
+# that dropped. Kill switch: touch ~/.config/arr-mismatch/no-drop (notes only). Dry run: `grabs --cron --dry-run`.
+7-59/15 * * * * /home/node/bin/arr-mismatch grabs --cron >> /home/node/.local/state/arr-mismatch-grabs.log 2>&1
+# Pre-trip readiness check (~/bin/pretrip-check, 2026-10-14; strictly read-only: reuses unraid-capacity/-health, hwtrend,
+# container-watch, vault status, brain-backup, remind; tests ~/opt/pretrip-check-tests/run.sh). OFF by default: the
+# one-off run on 18.11 comes from a `remind` note. Uncomment for an unattended run: report in ~/reports/unraid/, and an
+# ~/inbox note only when it found warnings (exit 1); no Telegram.
+# 0 9 18 11 * out=$(/home/node/bin/pretrip-check --md /home/node/reports/unraid/pretrip-check-$(date +\%F).md 2>&1) || printf '\%s\n\nDetails: ~/reports/unraid/pretrip-check-\%s.md. Read-only check, nothing changed: pitch fixes to the owner.\n' "$out" "$(date +\%F)" > /home/node/inbox/pretrip-check-$(date +\%s).md
+# Permanent HDD heat alert (~/bin/hddheat, 15.10; read-only: emhttp's disks.ini + var.ini over one ssh, no smartctl, wakes
+# no disk). Array + parity HDDs only: >= 58 °C on 2 consecutive checks -> ONE `tg` text, then silent 6 h unless +3 °C;
+# one "back to normal" text below 55 °C. 00-08 only >= 60 °C texts at once, the rest is held for 08:00. Silent when fine;
+# ssh failures silent. `hddheat show|status`. Tests: ~/opt/hddheat-tests/run.sh
+*/10 * * * * /home/node/bin/hddheat >> /home/node/.local/state/hddheat/cron.log 2>&1
+
+# Cache-TTL watch (~/bin/cache-ttl-watch, token-free, CC bug #102276): sums 5m vs 1h prompt-cache writes in the main
+# session transcript (last 24 h, incremental); ONE ~/inbox note only if 5m writes exceed 5 % of cache writes.
+15 9 * * * /home/node/bin/cache-ttl-watch >> /home/node/.local/state/cache-ttl-watch/cron.log 2>&1
+20 10 * * * $HOME/bin/ecovacs-fix-watch
+# WLED preset sync (~/bin/wled-sync, token-free): each WLED in HA that is online and not yet synced gets preset 1
+# "Filament warm" (seg 0 colour + Solid only, brightness/on-off untouched) as boot preset, verified by read-back;
+# once per WLED. ~/inbox note when one got synced (or failed 3 runs in a row). State ~/.local/state/wled-sync.json.
+3-59/10 * * * * /home/node/bin/wled-sync --quiet >> /home/node/.local/state/wled-sync.cron.log 2>&1
+# Transcript compaction (~/bin/transcript-compact): gzip subagent transcripts older than 3 days; never deletes.
+30 4 * * 0 /home/node/bin/transcript-compact >/dev/null 2>&1
+# Preclear watch for the new 10 TB (temporary; remove when it's in the array): notes only on start/stop/SMART change
+*/30 * * * * /home/node/bin/preclear-watch >> /home/node/.local/state/preclear-watch/cron.log 2>&1

@@ -1,0 +1,7 @@
+#!/bin/sh
+# tgread runs inside the privacy vault (container claude-vault, owner-approved): the Telegram archive,
+# the session and raw text never enter this box. This wrapper forwards to `vault tg` (same commands and options;
+# output is policy-filtered by the vault; --raw is refused: raw text only after the owner's ✅ on Telegram, `vault raw
+# request --source tg ...`; `tgread events` = the vault's live feed of new messages, triaged). Real tgread: ~/opt/claude-vault/vendor/tgread (canonical source, built into the vault image;
+# tests: ~/opt/tgread-tests/run.sh). Login: `vault tg set-credentials` + `vault tg login-qr`.
+exec /home/node/bin/vault tg "$@"

@@ -1,0 +1,17 @@
+{
+ "id": "liveNow0001",
+ "title": "Live now",
+ "channel": "Test Channel",
+ "uploader": "testchan",
+ "upload_date": "20260915",
+ "duration": 95,
+ "language": "en",
+ "live_status": "is_live",
+ "is_live": true,
+ "webpage_url": "https://www.youtube.com/watch?v=liveNow0001",
+ "extractor_key": "Youtube",
+ "description": "In this video we explain MoE routing.\n\n00:00 Intro\n01:00 Deep dive\nSponsor: example.com",
+ "chapters": null,
+ "subtitles": {},
+ "automatic_captions": {}
+}

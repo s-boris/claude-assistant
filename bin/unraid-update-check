@@ -1,0 +1,27 @@
+#!/bin/sh
+# Daily: is a newer stable Unraid OS out than what the server runs? Alerts the owner ONCE per new version.
+# Source: Unraid's own update-check endpoint (the same one the WebGUI uses).
+state=~/.local/state/unraid-health; mkdir -p $state
+us=${UNRAID_SSH_BIN:-$HOME/bin/unraid-ssh}   # owner's SSH lockdown: the read-only `version` verb
+pg=$(dirname "$(readlink -f "$0")")/profile-get; [ -x "$pg" ] || pg=profile-get
+sn=$("$pg" network.server_name 2>/dev/null) || sn=server
+case $("$us" mode 2>/dev/null) in verbs|emulate) lm=verbs ;; *) lm=root ;; esac
+if [ "$lm" = root ]; then
+  cur=$(ssh -o BatchMode=yes -o ConnectTimeout=10 unraid 'sed -n "s/^version=\"\(.*\)\"/\1/p" /etc/unraid-version' 2>/dev/null)
+else
+  cur=$("$us" run version 2>/dev/null | sed -n 's/^version="\(.*\)"/\1/p')
+fi
+[ -n "$cur" ] || exit 0                    # server unreachable: unraid-health reports that
+j=$(curl -fsS --max-time 20 "https://releases.unraid.net/os?branch=stable&current_version=$cur") || exit 0
+# Only a real answer may change the state: an empty body, non-JSON or JSON without isNewer (an error page) must
+# not count as "up to date": it would overwrite the state and re-announce a release he was already told about.
+[ -n "$j" ] || exit 0
+new=$(printf '%s\n' "$j" | jq -r 'if type == "object" and has("isNewer") then (select(.isNewer == true) | .version // empty)
+  else error("unexpected answer") end' 2>/dev/null) || exit 0
+[ -n "$new" ] || { echo "$cur" > $state/update-notified; exit 0; }   # up to date
+[ "$(cat $state/update-notified 2>/dev/null)" = "$new" ] && exit 0     # already told the owner
+notes=$(echo "$j" | jq -r '.changelogPretty // empty')
+if [ -n "$notes" ]; then rn="Release notes: $notes — update"; else rn="Update"; fi
+# remember only once he got it: a failed send is retried on the next daily run (tests: ~/opt/unraid-update-check-tests)
+tg "🖥️ Unraid $new is out ($sn runs $cur). $rn via Tools › Update OS when convenient (reboots the server, I'm offline for a few minutes)." &&
+  echo "$new" > $state/update-notified

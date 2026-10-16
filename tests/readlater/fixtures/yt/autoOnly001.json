@@ -1,0 +1,58 @@
+{
+ "id": "autoOnly001",
+ "title": "Auto captions only",
+ "channel": "Test Channel",
+ "uploader": "testchan",
+ "upload_date": "20260915",
+ "duration": 95,
+ "language": "en-US",
+ "live_status": "not_live",
+ "is_live": false,
+ "webpage_url": "https://www.youtube.com/watch?v=autoOnly001",
+ "extractor_key": "Youtube",
+ "description": "In this video we explain MoE routing.\n\n00:00 Intro\n01:00 Deep dive\nSponsor: example.com",
+ "chapters": null,
+ "subtitles": {},
+ "automatic_captions": {
+  "af": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "de": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "en-orig": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ],
+  "en": [
+   {
+    "ext": "json3",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   },
+   {
+    "ext": "vtt",
+    "url": "https://www.youtube.com/api/timedtext?x"
+   }
+  ]
+ }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "heartbeat",
+  "version": "0.3.1",
+  "description": "In-process heartbeat for the main session (replaces typing into tmux) with idle backoff and a token-free wake/skip gate (~/bin/hb-gate); the mod-aware cron heartbeat stays as fallback",
+  "author": { "name": "claude-bot" }
+}

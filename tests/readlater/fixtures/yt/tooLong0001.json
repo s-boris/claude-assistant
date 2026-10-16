@@ -1,0 +1,17 @@
+{
+ "id": "tooLong0001",
+ "title": "Ten hour mix",
+ "channel": "Test Channel",
+ "uploader": "testchan",
+ "upload_date": "20260915",
+ "duration": 36000,
+ "language": "en",
+ "live_status": "not_live",
+ "is_live": false,
+ "webpage_url": "https://www.youtube.com/watch?v=tooLong0001",
+ "extractor_key": "Youtube",
+ "description": "In this video we explain MoE routing.\n\n00:00 Intro\n01:00 Deep dive\nSponsor: example.com",
+ "chapters": null,
+ "subtitles": {},
+ "automatic_captions": {}
+}

@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# browser: a real, headed Google Chrome on a virtual display, for pages WebFetch can't handle (JS-heavy,
+# bot-protected, owner-approved logins). Driven by the Playwright MCP ("browser" MCP server) over CDP.
+#
+#   browser start            Xvfb :99 (1920x1080) + fluxbox + Chrome, CDP on 127.0.0.1:9222 only (idempotent)
+#   browser stop             stop Chrome (clean shutdown), the WM, Xvfb and the owner view; `ensure` then stays off
+#   browser restart
+#   browser ensure           start unless stopped on purpose (boot.sh, cron every 5 min)
+#   browser status           what's running, Chrome version, tabs, RAM, view
+#   browser screenshot [F]   PNG of the whole display (default ~/reports/browser/screen-<time>.png); prints the path
+#   browser url              open tabs (title + URL)
+#   browser open URL         open URL in a new tab
+#   browser view on [MIN]    owner view: x11vnc (127.0.0.1) + noVNC on 0.0.0.0:6080, VNC password in
+#                            ~/.secrets/novnc.txt; switches itself off after MIN minutes (default 60)
+#   browser view off|status
+#   browser update           upgrade google-chrome-stable; restarts a running Chrome if it changed (cron, daily)
+#
+# Profile (logins, cookies) persists in ~/.local/share/browser/profile. State + logs: ~/.local/state/browser.
+# Container notes: seccomp blocks user namespaces, so Chrome needs --no-sandbox; /dev/shm is 64 MB, so
+# --disable-dev-shm-usage. WebGL renders on Mesa llvmpipe (like a GPU-less Linux desktop) instead of SwiftShader.
+set -uo pipefail
+
+DISP=${BROWSER_DISPLAY:-:99}
+SIZE=${BROWSER_SIZE:-1920x1080}
+PORT=${BROWSER_CDP_PORT:-9222}
+VIEW_PORT=${BROWSER_VIEW_PORT:-6080}
+VNC_PORT=${BROWSER_VNC_PORT:-5900}
+PROFILE=$HOME/.local/share/browser/profile
+ST=$HOME/.local/state/browser
+SHOTS=$HOME/reports/browser
+PWFILE=$HOME/.secrets/novnc.txt
+CHROME=${BROWSER_CHROME:-/usr/bin/google-chrome-stable}
+CHROME_BIN=/opt/google/chrome/chrome
+mkdir -p "$ST" "$PROFILE"
+W=${SIZE%x*}; H=${SIZE#*x}
+export DISPLAY=$DISP TZ=Europe/Zurich
+
+log() { echo "$(date '+%F %T') $*" >>"$ST/browser.log"; }
+trim_logs() {  # logs are opened O_APPEND, so truncating in place is safe while the writers run
+  local f; for f in "$ST"/*.log; do [ -f "$f" ] && [ "$(stat -c %s "$f")" -gt 10000000 ] && : >"$f"; done; true
+}
+die() { echo "browser: $*" >&2; exit 1; }
+alive() { [ -f "$ST/$1.pid" ] && kill -0 "$(cat "$ST/$1.pid")" 2>/dev/null; }
+pidof_() { alive "$1" && cat "$ST/$1.pid"; }
+cdp_up() { curl -sf --max-time 2 "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; }
+x_up() { xdpyinfo -display "$DISP" >/dev/null 2>&1; }
+chrome_pids() { pgrep -u "$(id -u)" -f "^$CHROME_BIN .*--user-data-dir=$PROFILE" ; }
+spawn() {  # spawn NAME LOGFILE CMD... : detached, own session, pid file
+  local name=$1 logf=$2; shift 2
+  setsid nohup "$@" >>"$logf" 2>&1 </dev/null &
+  echo $! >"$ST/$name.pid"
+}
+stop_pid() {  # stop_pid NAME [GRACE_SECONDS]
+  local p; p=$(pidof_ "$1") || { rm -f "$ST/$1.pid"; return 0; }
+  kill "$p" 2>/dev/null
+  for _ in $(seq $(( ${2:-3} * 4 ))); do kill -0 "$p" 2>/dev/null || break; sleep 0.25; done
+  kill -9 "$p" 2>/dev/null; rm -f "$ST/$1.pid"
+}
+
+start_x() {
+  x_up && return 0
+  local n=${DISP#:} lock=/tmp/.X${DISP#:}-lock
+  # A container restart keeps /tmp: clear a stale lock from a dead server.
+  if [ -f "$lock" ] && ! kill -0 "$(tr -d ' ' <"$lock")" 2>/dev/null; then rm -f "$lock" "/tmp/.X11-unix/X$n"; fi
+  spawn xvfb "$ST/xvfb.log" Xvfb "$DISP" -screen 0 "${SIZE}x24" -dpi 96 -nolisten tcp +extension RANDR
+  for _ in $(seq 40); do x_up && return 0; sleep 0.25; done
+  die "Xvfb did not come up on $DISP (see $ST/xvfb.log)"
+}
+
+fluxbox_config() {
+  local d=$HOME/.fluxbox; mkdir -p "$d"
+  [ -f "$d/init" ] || cat >"$d/init" <<'EOF'
+session.screen0.toolbar.visible: false
+session.screen0.slit.autoHide: true
+session.screen0.workspaces: 1
+session.screen0.workspaceNames: Browser
+session.menuFile: ~/.fluxbox/menu
+session.keyFile: ~/.fluxbox/keys
+session.appsFile: ~/.fluxbox/apps
+EOF
+  [ -f "$d/apps" ] || cat >"$d/apps" <<'EOF'
+[app] (class=Google-chrome)
+  [Maximized] {yes}
+  [Deco] {NONE}
+[end]
+EOF
+  [ -f "$d/menu" ] || printf '[begin] (Browser)\n  [exec] (Chrome) {browser start}\n[end]\n' >"$d/menu"
+  [ -f "$d/keys" ] || : >"$d/keys"
+}
+
+start_wm() {
+  alive wm && return 0
+  fluxbox_config
+  spawn wm "$ST/wm.log" fluxbox -display "$DISP"
+  sleep 0.5
+}
+
+prefs() {  # only while Chrome is down: languages, clean exit flag, no password saving
+  python3 -I - "$PROFILE" <<'EOF'
+import json, os, sys
+d = os.path.join(sys.argv[1], 'Default'); os.makedirs(d, exist_ok=True)
+p = os.path.join(d, 'Preferences')
+try:
+    prefs = json.load(open(p))
+except Exception:
+    prefs = {}
+prefs.setdefault('intl', {})['accept_languages'] = 'de-CH,de,en-US,en'
+prof = prefs.setdefault('profile', {})
+prof['exit_type'] = 'Normal'; prof['exited_cleanly'] = True
+prof['password_manager_enabled'] = False
+prefs['credentials_enable_service'] = False
+prefs.setdefault('browser', {})['check_default_browser'] = False
+tmp = p + '.tmp'
+json.dump(prefs, open(tmp, 'w')); os.replace(tmp, p)
+EOF
+}
+
+start_chrome() {
+  cdp_up && return 0
+  if [ -n "$(chrome_pids)" ]; then   # running but CDP not (yet) answering
+    for _ in $(seq 20); do cdp_up && return 0; sleep 0.5; done
+    stop_chrome
+  fi
+  rm -f "$PROFILE"/Singleton{Lock,Socket,Cookie}
+  prefs
+  # Normal headed launch, no --enable-automation: navigator.webdriver stays false and there's no automation
+  # infobar. --no-sandbox is required here (see header); it shows a "unsupported flag" bar in the UI only.
+  spawn chrome "$ST/chrome.log" env LANG=de_CH.UTF-8 LANGUAGE=de_CH:de:en_US:en "$CHROME" \
+    --user-data-dir="$PROFILE" \
+    --remote-debugging-port="$PORT" --remote-debugging-address=127.0.0.1 \
+    --no-first-run --no-default-browser-check --password-store=basic \
+    --no-sandbox --disable-dev-shm-usage \
+    --use-angle=gl --ignore-gpu-blocklist \
+    --lang=de-CH --window-position=0,0 --window-size="$W,$H" --start-maximized \
+    about:blank
+  for _ in $(seq 60); do cdp_up && { log "chrome up ($(chrome_version))"; return 0; }; sleep 0.5; done
+  die "Chrome did not open CDP on 127.0.0.1:$PORT (see $ST/chrome.log)"
+}
+
+stop_chrome() {
+  local pids; pids=$(chrome_pids) || { rm -f "$ST/chrome.pid"; return 0; }
+  # Graceful: CDP Browser.close saves the session and cookies; SIGTERM as the fallback.
+  if cdp_up; then node --input-type=module - "$PORT" <<'EOF' 2>/dev/null
+const port = process.argv[2];
+const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+const ws = new WebSocket(v.webSocketDebuggerUrl);
+ws.onopen = () => ws.send(JSON.stringify({id: 1, method: 'Browser.close'}));
+ws.onmessage = ws.onclose = ws.onerror = () => process.exit(0);
+setTimeout(() => process.exit(0), 3000);
+EOF
+  fi
+  for _ in $(seq 40); do [ -z "$(chrome_pids)" ] && break; sleep 0.25; done
+  pids=$(chrome_pids) && { kill $pids 2>/dev/null; sleep 2; pids=$(chrome_pids) && kill -9 $pids 2>/dev/null; }
+  rm -f "$ST/chrome.pid"; log "chrome stopped"
+}
+
+chrome_version() { curl -sf --max-time 2 "http://127.0.0.1:$PORT/json/version" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["Browser"])' 2>/dev/null || "$CHROME" --version 2>/dev/null; }
+
+tabs() {
+  curl -sf --max-time 3 "http://127.0.0.1:$PORT/json/list" | python3 -I -c '
+import json, sys
+t = [x for x in json.load(sys.stdin) if x.get("type") == "page"]
+for x in t:
+    print((x.get("title") or "(untitled)")[:100]); print("  " + x.get("url", ""))
+if not t: print("(no tabs)")'
+}
+
+do_start() { rm -f "$ST/disabled"; start_x && start_wm && start_chrome; }
+do_stop() { view_off quiet; stop_chrome; stop_pid wm; stop_pid xvfb; touch "$ST/disabled"; log "stopped"; }
+
+screenshot() {
+  x_up || die "not running (browser start)"
+  local f=${1:-$SHOTS/screen-$(date +%Y%m%d-%H%M%S).png}
+  mkdir -p "$(dirname "$f")"
+  ffmpeg -hide_banner -loglevel error -f x11grab -video_size "$SIZE" -i "$DISP" -frames:v 1 -y "$f" || die "screenshot failed"
+  echo "$f"
+}
+
+# ---- owner view (noVNC) ----
+view_ip() {  # the address the container has on its Docker network
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+view_on() {
+  x_up || do_start >/dev/null || die "could not start the browser"
+  local mins=${1:-60}
+  [[ $mins =~ ^[0-9]+$ ]] || die "minutes must be a number"
+  if [ ! -s "$PWFILE" ]; then   # VNC auth uses at most 8 characters
+    ( umask 077; mkdir -p "$(dirname "$PWFILE")"; tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 8 >"$PWFILE" )
+  fi
+  chmod 600 "$PWFILE"
+  if ! alive vnc; then   # -passwdfile keeps the password off the command line
+    spawn vnc "$ST/vnc.log" x11vnc -display "$DISP" -localhost -rfbport "$VNC_PORT" -passwdfile "$PWFILE" \
+      -forever -shared -noxdamage -noxrecord -quiet
+    sleep 1
+  fi
+  alive novnc || spawn novnc "$ST/novnc.log" websockify --web /usr/share/novnc "0.0.0.0:$VIEW_PORT" "127.0.0.1:$VNC_PORT"
+  sleep 1
+  alive vnc && alive novnc || { view_off quiet; die "view failed to start (see $ST/vnc.log, $ST/novnc.log)"; }
+  stop_pid viewtimer 1
+  if [ "$mins" -gt 0 ]; then spawn viewtimer /dev/null sh -c "sleep $(( mins * 60 )) && exec '$0' view off"; fi
+  log "view on (${mins} min)"
+  echo "view on for ${mins} min: http://$(view_ip):$VIEW_PORT/vnc.html?autoconnect=1&resize=scale (container network; password in $PWFILE)"
+}
+view_off() {
+  local was=; alive vnc || alive novnc && was=1
+  stop_pid novnc 2; stop_pid vnc 2
+  # The auto-off timer execs `browser view off`, so there $$ is the timer's own pid: don't kill ourselves.
+  if [ "$(cat "$ST/viewtimer.pid" 2>/dev/null)" = "$$" ]; then rm -f "$ST/viewtimer.pid"; else stop_pid viewtimer 1; fi
+  [ -n "$was" ] && log "view off"
+  [ "${1:-}" = quiet ] || echo "view off"
+}
+view_status() {
+  if alive vnc && alive novnc; then echo "view: on, http://$(view_ip):$VIEW_PORT/vnc.html (password in $PWFILE)"
+  else echo "view: off"; fi
+}
+
+status() {
+  local rc=0 rss
+  x_up && echo "display: $DISP ${SIZE} (Xvfb pid $(pidof_ xvfb || echo '?'))" || { echo "display: down"; rc=1; }
+  alive wm && echo "wm: fluxbox (pid $(pidof_ wm))" || echo "wm: down"
+  if cdp_up; then
+    rss=$(ps -o rss= -p "$(chrome_pids | paste -sd, -)" 2>/dev/null | awk '{s+=$1} END {printf "%.0f", s/1024}')
+    echo "chrome: $(chrome_version), CDP http://127.0.0.1:$PORT, $(chrome_pids | wc -l) processes, ~${rss} MB RSS"
+    echo "profile: $PROFILE ($(du -sh "$PROFILE" 2>/dev/null | cut -f1))"
+    echo "tabs:"; tabs | sed 's/^/  /'
+  else echo "chrome: down$([ -f "$ST/disabled" ] && echo ' (stopped on purpose; browser start)')"; rc=1; fi
+  view_status
+  return $rc
+}
+
+update() {
+  local before after
+  before=$(dpkg-query -W -f='${Version}' google-chrome-stable 2>/dev/null)
+  # Refresh only Google's source (fast); fall back to a full update.
+  sudo apt-get update -qq -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/google-chrome.sources \
+    -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >/dev/null 2>&1 || sudo apt-get update -qq >/dev/null 2>&1
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --only-upgrade google-chrome-stable >/dev/null 2>&1
+  after=$(dpkg-query -W -f='${Version}' google-chrome-stable 2>/dev/null)
+  if [ "$before" != "$after" ]; then
+    log "chrome updated $before -> $after"; echo "chrome updated $before -> $after"
+    if cdp_up; then stop_chrome; do_start >/dev/null && echo "restarted"; fi
+  else echo "chrome $after is current"; fi
+}
+
+case "${1:-}" in
+  start) do_start && status ;;
+  ensure) trim_logs; [ -f "$ST/disabled" ] || { start_x && start_wm && start_chrome; } ;;
+  stop) do_stop; echo stopped ;;
+  restart) stop_chrome; do_start && status ;;
+  status) status ;;
+  screenshot|shot) screenshot "${2:-}" ;;
+  url|tabs) cdp_up || die "not running (browser start)"; tabs ;;
+  open) [ -n "${2:-}" ] || die "usage: browser open URL"; cdp_up || do_start >/dev/null || exit 1
+        curl -sf -X PUT "http://127.0.0.1:$PORT/json/new?$2" >/dev/null && echo "opened $2" || die "could not open $2" ;;
+  view) case "${2:-status}" in
+          on) view_on "${3:-60}" ;; off) view_off ;; status) view_status ;;
+          *) die "usage: browser view on [MIN]|off|status" ;; esac ;;
+  update) update ;;
+  -h|--help|help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "usage: browser start|stop|restart|ensure|status|screenshot [file]|url|open URL|view on [MIN]|off|status|update" >&2; exit 2 ;;
+esac

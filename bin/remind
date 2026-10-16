@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""Durable reminders (survive restarts, unlike CronCreate).
+
+  remind add [--owner] [--tag TAG] [--every RULE [--until YYYY-MM-DD]] "2026-10-12 10:00" "text"
+                                    add one (local time, Europe/Zurich)
+  remind list                       pending reminders, numbered; recurring ones show "(every Mon)"
+  remind cancel N                   remove reminder N (from `list`); a recurring one goes with its whole series
+  remind cancel --tag TAG           remove every reminder with this tag (e.g. bill:3)
+  remind cancel --match TEXT        remove every reminder whose text contains TEXT (case-insensitive)
+  remind skip N                     recurring only: skip the next occurrence, keep the series
+  remind due                        (cron, every minute) fire due reminders
+
+--owner: for the owner. At the due time the text is sent straight to their Telegram via `tg`
+         ("⏰ text"), with no tokens and no need for me to be awake.
+default: for me. A due reminder becomes a note in ~/inbox and the next heartbeat acts on it.
+--tag:   a machine key so a script can cancel its own reminders later (~/bin/bills uses bill:<id>).
+--every: repeat. RULE is one of
+           daily | weekdays | weekends | weekly[:mon,thu] | monthly[:DAY|last] | yearly | every:Nd | every:Nw
+         aliases: day, weekday, week, month, year, "mon,thu" (= weekly:mon,thu), 3d, 2w; German day names
+         work too (mo,di,mi,do,fr,sa,so / montag…). Plain weekly/monthly/yearly repeat on the first date's
+         weekday / day of month / date. The given datetime is the first occurrence; it moves forward to the
+         first matching day (weekdays from a Saturday → Monday) and, if already past, to the next future slot.
+         After each fire the next occurrence is computed in Zurich wall time (09:00 stays 09:00 across DST);
+         after downtime it fires once and jumps to the next future slot (no catch-up storm).
+         monthly:31 means the 31st or the month's last day if shorter.
+--until: last day of a series (inclusive).
+
+Tests: REMIND_DB=/tmp/x.json points it at another state file, REMIND_TG at another sender,
+REMIND_INBOX at another inbox, REMIND_NOW="YYYY-MM-DD HH:MM" fakes the current time.
+"""
+import calendar, fcntl, json, os, re, subprocess, sys, time
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+DB = os.environ.get('REMIND_DB') or os.path.expanduser('~/.local/state/remind/reminders.json')
+INBOX = os.environ.get('REMIND_INBOX') or os.path.expanduser('~/inbox')
+TG = os.environ.get('REMIND_TG') or (
+    os.path.expanduser('~/bin/tg') if os.path.exists(os.path.expanduser('~/bin/tg')) else 'tg')
+TZ = ZoneInfo('Europe/Zurich')
+FMT = '%Y-%m-%d %H:%M'
+
+# Day names: the first two letters of English and German names never collide.
+DOW = {'mo': 0, 'tu': 1, 'di': 1, 'we': 2, 'mi': 2, 'th': 3, 'do': 3, 'fr': 4, 'sa': 5, 'su': 6, 'so': 6}
+DAY_ABBR = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def now_local():
+    """Current Zurich wall time, naive (reminder times are stored as naive local wall times)."""
+    fake = os.environ.get('REMIND_NOW')
+    if fake:
+        return datetime.strptime(fake, FMT)
+    return datetime.now(TZ).replace(tzinfo=None, second=0, microsecond=0)
+
+
+def lock():
+    """Serialize load-modify-save (cron's `due` vs. scripts adding/cancelling)."""
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    fd = os.open(DB + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def load():
+    try:
+        with open(DB) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save(items):
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
+    tmp = DB + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(items, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, DB)
+
+
+# ---------------------------------------------------------------- recurrence
+
+class RuleError(ValueError):
+    pass
+
+
+def parse_days(spec):
+    days = set()
+    for tok in re.split(r'[,\s/+]+', spec.strip().lower()):
+        if not tok:
+            continue
+        if len(tok) < 2 or not tok.isalpha() or tok[:2] not in DOW:
+            raise RuleError(f'unknown day "{tok}"')
+        days.add(DOW[tok[:2]])
+    if not days:
+        raise RuleError('no days given')
+    return sorted(days)
+
+
+def normalize_rule(spec, first):
+    """User RULE + first datetime → canonical rule string stored in r['every']."""
+    s = spec.strip().lower()
+    if s in ('daily', 'day', 'every day', 'everyday'):
+        return 'daily'
+    if s in ('weekdays', 'weekday', 'workdays', 'werktags'):
+        return 'weekdays'
+    if s in ('weekends', 'weekend'):
+        return 'weekly:sat,sun'
+    if s in ('weekly', 'week'):
+        return f'weekly:{DAY_ABBR[first.weekday()].lower()}'
+    if s in ('monthly', 'month'):
+        return f'monthly:{first.day}'
+    if s in ('yearly', 'year', 'annually'):
+        return f'yearly:{first:%m-%d}'
+    m = re.fullmatch(r'(?:every:)?(\d+)\s*([dw])', s)
+    if m:
+        n = int(m.group(1))
+        if n < 1 or n > 3660:
+            raise RuleError('interval must be 1..3660')
+        return f'every:{n}{m.group(2)}'
+    m = re.fullmatch(r'monthly:(\d{1,2}|last)', s)
+    if m:
+        v = m.group(1)
+        if v != 'last' and not 1 <= int(v) <= 31:
+            raise RuleError('monthly:DAY needs a day 1..31')
+        return f'monthly:{v if v == "last" else int(v)}'
+    m = re.fullmatch(r'yearly:(\d{2})-(\d{2})', s)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        if not (1 <= mo <= 12 and 1 <= d <= calendar.monthrange(2024, mo)[1]):
+            raise RuleError('yearly:MM-DD is not a valid date')
+        return f'yearly:{mo:02d}-{d:02d}'
+    if s.startswith('weekly:'):
+        s = s[len('weekly:'):]
+    try:
+        days = parse_days(s)
+    except RuleError as e:
+        raise RuleError(f'unknown --every rule "{spec}" ({e})')
+    return 'weekly:' + ','.join(DAY_ABBR[d].lower() for d in days)
+
+
+def last_day(y, m):
+    return calendar.monthrange(y, m)[1]
+
+
+def day_matches(rule, d):
+    kind, _, arg = rule.partition(':')
+    if kind == 'daily':
+        return True
+    if kind == 'weekdays':
+        return d.weekday() < 5
+    if kind == 'weekly':
+        return d.weekday() in {DOW[x[:2]] for x in arg.split(',')}
+    if kind == 'monthly':
+        ld = last_day(d.year, d.month)
+        return d.day == (ld if arg == 'last' else min(int(arg), ld))
+    if kind == 'yearly':
+        mo, dd = int(arg[:2]), int(arg[3:])
+        return d.month == mo and d.day == min(dd, last_day(d.year, mo))
+    raise RuleError(f'bad stored rule {rule}')
+
+
+def interval_days(rule):
+    """every:Nd / every:Nw → N days; None for calendar rules."""
+    m = re.fullmatch(r'every:(\d+)([dw])', rule)
+    if not m:
+        return None
+    return int(m.group(1)) * (7 if m.group(2) == 'w' else 1)
+
+
+def snap(rule, dt):
+    """First slot at or after dt (same wall-clock time)."""
+    if interval_days(rule):
+        return dt
+    d = dt.date()
+    for _ in range(800):
+        if day_matches(rule, d):
+            return datetime.combine(d, dt.time())
+        d += timedelta(days=1)
+    raise RuleError(f'no matching day for {rule}')
+
+
+def succ(rule, dt):
+    """The slot after slot dt. Works on wall-clock dates, so the time of day never drifts with DST."""
+    n = interval_days(rule)
+    if n:
+        return dt + timedelta(days=n)
+    return snap(rule, dt + timedelta(days=1))
+
+
+def next_after(rule, at, ref):
+    """First slot of the series strictly after ref (slots: at, succ(at), …)."""
+    s = at
+    for _ in range(200000):
+        if s > ref:
+            return s
+        s = succ(rule, s)
+    raise RuleError('runaway recurrence')
+
+
+def ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def describe(rule):
+    kind, _, arg = rule.partition(':')
+    if kind == 'daily':
+        return 'day'
+    if kind == 'weekdays':
+        return 'weekday'
+    if kind == 'weekly':
+        return ', '.join(DAY_ABBR[DOW[x[:2]]] for x in arg.split(','))
+    if kind == 'monthly':
+        return 'month on the ' + ('last day' if arg == 'last' else ordinal(int(arg)))
+    if kind == 'yearly':
+        return f"year on {int(arg[3:])} {calendar.month_abbr[int(arg[:2])]}"
+    n = interval_days(rule)
+    if n:
+        m = re.fullmatch(r'every:(\d+)([dw])', rule)
+        k, unit = int(m.group(1)), {'d': 'day', 'w': 'week'}[m.group(2)]
+        return unit if k == 1 else f'{k} {unit}s'
+    return rule
+
+
+def series_txt(r):
+    if not r.get('every'):
+        return ''
+    until = f", until {r['until']}" if r.get('until') else ''
+    return f"  (every {describe(r['every'])}{until})"
+
+
+def reschedule(r, ref):
+    """Copy of recurring r moved to its next slot after ref, or None when the series has ended."""
+    nxt = next_after(r['every'], datetime.strptime(r['at'], FMT), ref)
+    if r.get('until') and nxt.date() > date.fromisoformat(r['until']):
+        return None
+    return {**r, 'at': nxt.strftime(FMT)}
+
+
+# ---------------------------------------------------------------- firing
+
+def fire(r, i):
+    if r.get('owner'):
+        res = subprocess.run([TG, f"⏰ {r['text']}"], capture_output=True)
+        if res.returncode == 0:
+            return True
+        # couldn't text the owner: hand it to me instead
+    os.makedirs(INBOX, exist_ok=True)
+    who = 'OWNER reminder (tg failed, send it yourself)' if r.get('owner') else 'Reminder'
+    every = f", every {describe(r['every'])}" if r.get('every') else ''
+    with open(os.path.join(INBOX, f'reminder-{int(time.time())}-{os.getpid()}-{i}.md'), 'w') as f:
+        f.write(f"{who} (set for {r['at']}{every}): {r['text']}\n")
+    return True
+
+
+def take_opt(args, name):
+    """Remove `name VALUE` from args and return VALUE (None if absent)."""
+    if name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            raise SystemExit(f'remind: {name} needs a value')
+        val = args[i + 1]
+        del args[i:i + 2]
+        return val
+    return None
+
+
+def pick(items, arg):
+    try:
+        n = int(arg)
+    except ValueError:
+        return None
+    return n if 1 <= n <= len(items) else None
+
+
+def main(argv):
+    args = argv[1:]
+    cmd = args.pop(0) if args else 'list'
+    if cmd not in ('add', 'list', 'cancel', 'skip', 'due'):
+        print(__doc__.strip()); return 2
+    lk = lock()
+    items = load()
+    if cmd == 'add':
+        owner = '--owner' in args
+        args = [a for a in args if a != '--owner']
+        tag = take_opt(args, '--tag')
+        every = take_opt(args, '--every')
+        until = take_opt(args, '--until')
+        if len(args) != 2:
+            print(__doc__.strip()); return 2
+        try:
+            when = datetime.strptime(args[0], FMT)
+        except ValueError:
+            print(f'remind: bad time "{args[0]}", use "YYYY-MM-DD HH:MM"', file=sys.stderr); return 2
+        if until is not None and every is None:
+            print('remind: --until only works with --every', file=sys.stderr); return 2
+        r = {'at': when.strftime(FMT), 'text': args[1], 'owner': owner}
+        note = ''
+        if every is not None:
+            try:
+                rule = normalize_rule(every, when)
+                if until is not None:
+                    until = date.fromisoformat(until).isoformat()
+                first = snap(rule, when)
+                if first != when:
+                    note = ' (first matching day)'
+                now = now_local()
+                if first < now:
+                    first = next_after(rule, first, now - timedelta(minutes=1))
+                    note = ' (given time already past: first occurrence moved forward)'
+            except (RuleError, ValueError) as e:
+                print(f'remind: {e}', file=sys.stderr); return 2
+            if until is not None and first.date() > date.fromisoformat(until):
+                print(f'remind: first occurrence {first:{FMT}} is after --until {until}', file=sys.stderr); return 2
+            when = first
+            r.update({'at': first.strftime(FMT), 'every': rule})
+            if until is not None:
+                r['until'] = until
+        if tag:
+            r['tag'] = tag
+        items.append(r)
+        items.sort(key=lambda r: r['at'])
+        save(items)
+        print(f"added {'owner ' if owner else ''}reminder for {when:%a %Y-%m-%d %H:%M}"
+              + (f", every {describe(r['every'])}" if r.get('every') else '')
+              + (f" until {r['until']}" if r.get('until') else '') + note)
+    elif cmd == 'list':
+        for n, r in enumerate(items, 1):
+            tag = f"  (tag {r['tag']})" if r.get('tag') else ''
+            print(f"{n:>2}. {r['at']}  {'[owner] ' if r.get('owner') else ''}{r['text']}{series_txt(r)}{tag}")
+        if not items:
+            print('(none)')
+    elif cmd == 'cancel':
+        tag = take_opt(args, '--tag')
+        match = take_opt(args, '--match')
+        if tag is not None or match is not None:
+            if args or (tag is not None and match is not None) or not (tag or match):
+                print(__doc__.strip()); return 2
+            if tag is not None:
+                hit = lambda r: r.get('tag') == tag
+            else:
+                hit = lambda r: match.lower() in r['text'].lower()
+            gone = [r for r in items if hit(r)]
+            if gone:
+                save([r for r in items if not hit(r)])
+            for r in gone:
+                print(f"cancelled: {r['at']}  {r['text']}{series_txt(r)}")
+            if not gone:
+                print('no matching reminder')
+            return 0
+        if len(args) != 1:
+            print(__doc__.strip()); return 2
+        n = pick(items, args[0])
+        if n is None:
+            print('no such reminder'); return 1
+        r = items.pop(n - 1)
+        save(items)
+        print(f"cancelled: {r['at']}  {r['text']}{series_txt(r)}")
+    elif cmd == 'skip':
+        if len(args) != 1:
+            print(__doc__.strip()); return 2
+        n = pick(items, args[0])
+        if n is None:
+            print('no such reminder'); return 1
+        r = items[n - 1]
+        if not r.get('every'):
+            print(f'reminder {n} is not recurring; use `remind cancel {n}`'); return 1
+        nxt = reschedule(r, datetime.strptime(r['at'], FMT))
+        if nxt is None:
+            items.pop(n - 1)
+            save(items)
+            print(f"skipped {r['at']}, the last occurrence: series ended ({r['text']})")
+            return 0
+        items[n - 1] = nxt
+        items.sort(key=lambda r: r['at'])
+        save(items)
+        print(f"skipped {r['at']}; next: {datetime.strptime(nxt['at'], FMT):%a %Y-%m-%d %H:%M}  {r['text']}")
+    elif cmd == 'due':
+        now_dt = now_local()
+        now = now_dt.strftime(FMT)
+        due = [r for r in items if r['at'] <= now]
+        if not due:
+            return 0
+        keep = [r for r in items if r['at'] > now]
+        for r in due:
+            if r.get('every'):
+                try:
+                    nxt = reschedule(r, now_dt)   # fire once, then the next FUTURE slot: no catch-up storm
+                except (RuleError, ValueError):
+                    nxt = None                    # corrupt rule: fire this once, drop the series
+                if nxt is not None:
+                    keep.append(nxt)
+        keep.sort(key=lambda r: r['at'])
+        save(keep)                                   # save first (series re-inserted): never fire twice
+        os.close(lk)                                 # don't hold the lock while texting
+        for i, r in enumerate(due):
+            fire(r, i)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

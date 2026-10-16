@@ -1,0 +1,17 @@
+{
+ "id": "noCaps00001",
+ "title": "No captions here",
+ "channel": "Test Channel",
+ "uploader": "testchan",
+ "upload_date": "20260915",
+ "duration": 5,
+ "language": null,
+ "live_status": "not_live",
+ "is_live": false,
+ "webpage_url": "https://www.youtube.com/watch?v=noCaps00001",
+ "extractor_key": "Youtube",
+ "description": "In this video we explain MoE routing.\n\n00:00 Intro\n01:00 Deep dive\nSponsor: example.com",
+ "chapters": null,
+ "subtitles": {},
+ "automatic_captions": {}
+}

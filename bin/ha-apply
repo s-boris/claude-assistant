@@ -1,0 +1,1872 @@
+#!/usr/bin/env python3
+"""ha-apply: the owner-approved WRITE tool for the Home Assistant cleanup (one group per approved
+poll item). ha-audit stays read-only; this is the only path for HA config and registry writes.
+
+Usage:
+  ha-apply GROUP [--apply] [--replace light.x]
+  ha-apply show backups|backup-config|hallway
+Groups (one per approved poll item):
+  orphans        remove the 16 orphaned entities (12 iBeacon, 4 cast players) + their then-empty devices
+  phones         unlink the Galaxy S20 FE + S24 Ultra trackers from the owner's HA person (profile
+                 services.ha_user; keeps his current phone, services.ha_phone)
+  zigbee         remove the 13 dead ZHA devices (5 Hue, 3 IKEA E14, 3 RODRET, 2 TS011F plugs)
+  hallway        automation.hallway_lights_on_presence: --replace light.x fixes the missing light,
+                 otherwise it is kept turned off (never deleted)
+  backup-config  automatic backups daily 03:15, keep 7, all add-ons + database, local agent
+Round 2 (owner-approved poll; undo section "round2"):
+  plants         delete the 6 silent Xiaomi BLE plant sensor config entries (HHCCJCY01, one device each)
+  wiz            delete the ONE offline WiZ socket config entry (not loaded, entities unavailable);
+                 loaded WiZ entries are never touched
+  ibeacon        remove the 6 old iBeacon shell devices (only integration-disabled sensors left) from the
+                 iBeacon entry; the entry itself and any other iBeacon device stay
+  old-phones     delete the mobile_app entries of the Galaxy S20 FE + Galaxy 24 Ultra (not linked to any
+                 person); the household's current phones are refused by model (profile services.ha_keep_models)
+Round 3 (owner-approved poll, all 9 pass-2 actions; undo section "round3"):
+  vacuum         Ecovacs: device name "DEEBOT X9 Pro Omni", entity ids <email-slug>_* -> deebot_* (+ dashboard refs)
+  hacs           remove the 3 never-set-up HACS integrations (Adaptive Lighting, UI Minimalist, MikroTik) via HACS
+  addons         ESPHome Device Builder + Matter Server add-ons: boot manual + stop (not uninstalled)
+  sonos          Living Room (L)/(R) -> living_room, Bedroom -> bedroom; ids living_room_left/right_*, bedroom_speaker_*
+  zigbee-rooms   RODRET dimmers (room from the automation using them), SNZB-02P/TH01 climate sensors, Hue plug:
+                 area + clean ids (<room>_dimmer_*, <room>_temperature/_humidity/_climate_*, balcony_plug*)
+  helpers        delete the empty Balcony Lights group + 2 unused input_booleans; Growlights: drop missing members
+                 (options flow); never deletes Growlights
+  scene          delete scene.full_light (config appended to scenes-removed-2026-10-16.json first)
+  dupes          living_room_tv_2 -> living_room_tv_cast, home_theater_2 -> home_theater_heos, both hidden
+  hue-log        logger HueBLE -> ERROR, persistent (ws logger/log_level permanent); `show hue-log` checks the log
+  scene-create   write the 4 scenes Movie, Dim Light, Ambient, Full Light (config ids kept, so scene.movie,
+                 scene.dim_light, scene.ambient, scene.full_light) + scene.reload + read-back; never activates
+                 a scene (scene.turn_on is not on the allowlist); undo section "scene-rebuild"
+  Renames rewrite exact old-id references in stored dashboards (not home-mobile: rerun ha-dashboard-gen) and automations.
+Default = dry run (reads only, prints the plan). --apply: write the before-state into the undo file,
+make the change, verify it with a read.
+
+Safety by construction (Guard): websocket types WS_READ/WS_WRITE, services CALL_SERVICE_ALLOW and REST
+REST_ALLOW are explicit allowlists; any write additionally needs --apply AND a target (entity/device/
+person/automation id) that this run's plan approved. Anything else raises NotAllowed before a byte is sent.
+Tests: ~/opt/ha-apply-tests/run.sh. Undo record: ~/reports/ha/ha-cleanup-undo-2026-10-15.json
+(privacy-scrubbed; a full restore = the HA backup "Before cleanup 2026-10-15").
+Privacy: no coordinates, addresses, SSIDs, IPs, BT names/MACs or emails are printed or stored
+(BT entity ids are hashed like ha-audit does; ZHA IEEE only as a hash).
+Token: ~/.secrets/ha-admin-token (never printed). Reuses ha-audit's websocket framing and scrubbers
+(imported unchanged from ~/bin/ha-audit).
+"""
+import argparse
+import datetime as dt
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+sys.dont_write_bytecode = True
+
+
+def _load_audit():
+    path = os.environ.get('HA_AUDIT_LIB', os.path.expanduser('~/bin/ha-audit'))
+    loader = importlib.machinery.SourceFileLoader('ha_audit_lib', path)
+    spec = importlib.util.spec_from_loader('ha_audit_lib', loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+A = _load_audit()
+
+AUDIT_JSON = os.path.expanduser('~/reports/ha/ha-cleanup-audit-2026-10-15.json')
+UNDO = os.path.expanduser(os.environ.get('HA_APPLY_UNDO', '~/reports/ha/ha-cleanup-undo-2026-10-15.json'))
+
+
+class NotAllowed(Exception):
+    """Raised before anything off the allowlist / outside the approved plan could be sent."""
+
+
+# ----------------------------------------------------------------------------- allowlists
+WS_READ = {
+    'get_states': set(),
+    'config/entity_registry/list': set(),
+    'config/device_registry/list': set(),
+    'config/area_registry/list': set(),
+    'config_entries/get': {'domain', 'type_filter'},
+    'person/list': set(),
+    'backup/info': set(),
+    'backup/config/info': set(),
+    'backup/agents/info': set(),
+    'hacs/repositories/list': set(),            # round 3
+    'lovelace/dashboards/list': set(),
+    'lovelace/config': {'url_path', 'force'},
+    'input_boolean/list': set(),
+    'system_log/list': set(),
+    'logger/log_info': set(),
+}
+WS_WRITE = {
+    'config/entity_registry/remove': {'entity_id'},
+    'config/device_registry/remove_config_entry': {'device_id', 'config_entry_id'},
+    'person/update': {'person_id', 'name', 'user_id', 'device_trackers', 'picture'},
+    'backup/config/update': {'create_backup', 'retention', 'schedule', 'automatic_backups_configured'},
+    'call_service': {'domain', 'service', 'service_data'},
+    # round 3: every one of these needs the EXACT message approved by the plan (target_key = canonical params)
+    'config/device_registry/update': {'device_id', 'name_by_user', 'area_id'},
+    'config/entity_registry/update': {'entity_id', 'new_entity_id', 'hidden_by'},
+    'hacs/repository/remove': {'repository'},
+    'supervisor/api': {'endpoint', 'method', 'data', 'timeout'},
+    'input_boolean/delete': {'input_boolean_id'},
+    'lovelace/config/save': {'url_path', 'config'},
+    'logger/log_level': {'module', 'level', 'persistence'},
+}
+EXACT_TYPES = {'config/device_registry/update', 'config/entity_registry/update', 'hacs/repository/remove',
+               'supervisor/api', 'input_boolean/delete', 'lovelace/config/save', 'logger/log_level'}
+SUP_WRITE_RX = re.compile(r'/addons/(?:5c53de3b_esphome|core_matter_server)/(?:stop|options)')
+SUP_READ_RX = re.compile(r'/addons/[a-z0-9_\-]{1,80}/info')
+CALL_SERVICE_ALLOW = {('zha', 'remove'): {'ieee'}, ('automation', 'turn_off'): {'entity_id'},
+                      ('scene', 'reload'): set()}  # never scene.turn_on: scenes are written, not activated
+SCENE_PATH = r'/api/config/scene/config/[0-9A-Za-z_\-]{1,40}'
+AUTOMATION_PATH = r'/api/config/automation/config/[A-Za-z0-9_.\-]{1,80}'
+ENTRY_PATH = r'/api/config/config_entries/entry/[0-9A-Za-z]{20,40}'  # config entry delete (round 2)
+REST_ALLOW = (
+    ('GET', re.compile(AUTOMATION_PATH)),
+    ('GET', re.compile(r'/api/states/automation\.[a-z0-9_]{1,80}')),
+    ('POST', re.compile(AUTOMATION_PATH)),
+    ('DELETE', re.compile(ENTRY_PATH)),
+    ('GET', re.compile(r'/api/config/scene/config/[0-9A-Za-z_\-]{1,40}')),       # round 3
+    ('DELETE', re.compile(r'/api/config/scene/config/[0-9A-Za-z_\-]{1,40}')),
+    ('POST', re.compile(SCENE_PATH)),                                          # scene-create (body-keyed)
+    ('POST', re.compile(r'/api/config/config_entries/options/flow')),
+    ('POST', re.compile(r'/api/config/config_entries/options/flow/[0-9a-f]{32}')),
+    ('DELETE', re.compile(r'/api/config/config_entries/options/flow/[0-9a-f]{32}')),
+)
+BODY_KEYED = (re.compile(r'/api/config/config_entries/options/flow(?:/[0-9a-f]{32})?'), re.compile(SCENE_PATH))  # POST: body is part of the target
+
+
+def target_key(t, p):
+    if t == 'config/entity_registry/remove':
+        return (t, p.get('entity_id'))
+    if t == 'config/device_registry/remove_config_entry':
+        return (t, p.get('device_id'), p.get('config_entry_id'))
+    if t == 'person/update':
+        return (t, p.get('person_id'))
+    if t == 'backup/config/update':
+        return (t,)
+    if t == 'call_service':
+        dom, svc = p.get('domain'), p.get('service')
+        allowed = CALL_SERVICE_ALLOW.get((dom, svc))
+        if allowed is None:
+            raise NotAllowed(f'service {dom}.{svc} is not on the allowlist')
+        data = p.get('service_data') or {}
+        if not isinstance(data, dict) or set(data) - allowed:
+            raise NotAllowed(f'service {dom}.{svc}: data keys not allowed')
+        return (t, dom, svc, json.dumps(data, sort_keys=True))
+    if t in EXACT_TYPES:
+        if t == 'supervisor/api':
+            if p.get('method') != 'post' or not SUP_WRITE_RX.fullmatch(str(p.get('endpoint', ''))):
+                raise NotAllowed('supervisor/api: only POST stop/options of the 2 approved add-ons')
+            if str(p['endpoint']).endswith('/options') and p.get('data') != {'boot': 'manual'}:
+                raise NotAllowed('supervisor/api options: only {boot: manual}')
+            if str(p['endpoint']).endswith('/stop') and 'data' in p:
+                raise NotAllowed('supervisor/api stop: no data')
+        if t == 'lovelace/config/save' and p.get('url_path') == 'home-mobile':
+            raise NotAllowed('home-mobile belongs to ha-dashboard-gen')
+        if t == 'config/entity_registry/update' and p.get('hidden_by') not in (None, 'user'):
+            raise NotAllowed('hidden_by may only be set to user')
+        return (t, json.dumps(p, sort_keys=True, default=str))
+    raise NotAllowed(f'no target rule for {t!r}')
+
+
+class Guard:
+    def __init__(self, writes=False):
+        self.writes = writes
+        self.targets = set()
+
+    def approve(self, key):
+        self.targets.add(key)
+
+    def check_ws(self, t, p):
+        if (t == 'supervisor/api' and p.get('method') == 'get' and set(p) <= {'endpoint', 'method'}
+                and SUP_READ_RX.fullmatch(str(p.get('endpoint', '')))):
+            return  # add-on info read
+        if t in WS_READ:
+            if set(p) - WS_READ[t]:
+                raise NotAllowed(f'websocket {t}: keys {sorted(set(p) - WS_READ[t])} not allowed')
+            return
+        if t not in WS_WRITE:
+            raise NotAllowed(f'websocket type {t!r} is not on the allowlist')
+        if set(p) - WS_WRITE[t]:
+            raise NotAllowed(f'websocket {t}: keys {sorted(set(p) - WS_WRITE[t])} not allowed')
+        key = target_key(t, p)
+        if not self.writes:
+            raise NotAllowed(f'{t}: dry run, writes need --apply')
+        if key not in self.targets:
+            raise NotAllowed(f'{t}: target is not in this run\'s approved plan')
+
+    def check_rest(self, method, path, body=None):
+        if not any(m == method and rx.fullmatch(path or '') for m, rx in REST_ALLOW):
+            raise NotAllowed(f'REST {method} {path!r} is not on the allowlist')
+        if method != 'GET':
+            if not self.writes:
+                raise NotAllowed(f'REST {method}: dry run, writes need --apply')
+            key = ('rest', method, path)
+            if method == 'POST' and any(rx.fullmatch(path) for rx in BODY_KEYED):
+                key = ('rest', method, path, json.dumps(body, sort_keys=True, default=str))
+            if key not in self.targets:
+                raise NotAllowed(f'REST {method} {path!r}: not in this run\'s approved plan')
+
+
+# ----------------------------------------------------------------------------- clients
+class WS(A.WSClient):
+    def __init__(self, base, token, guard):
+        self.guard = guard
+        super().__init__(base, token)
+
+    def call(self, msg_type, **params):
+        self.guard.check_ws(msg_type, params)
+        self._id += 1
+        mid = self._id
+        self._send_json(dict(params, id=mid, type=msg_type))
+        while True:
+            msg = self._recv_json()
+            if msg.get('id') == mid and msg.get('type') == 'result':
+                if not msg.get('success'):
+                    err = msg.get('error') or {}
+                    raise A.HAError(f"{msg_type}: {err.get('code', 'error')} {A.short_err(err.get('message'), 120)}")
+                return msg.get('result')
+
+
+class Rest:
+    def __init__(self, base, token, guard, timeout=60):
+        self.base, self._token, self.guard, self.timeout = base.rstrip('/'), token, guard, timeout
+        self._opener = urllib.request.build_opener(A._NoRedirect())
+
+    def request(self, method, path, body=None):
+        self.guard.check_rest(method, path, body)
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers={
+            'Authorization': 'Bearer ' + self._token, 'Content-Type': 'application/json'})
+        try:
+            with self._opener.open(req, timeout=self.timeout) as r:
+                raw = r.read()
+        except urllib.error.HTTPError as e:
+            raise A.HAError(f'HTTP {e.code} on {method} {path}') from None
+        return json.loads(raw.decode()) if raw else None
+
+
+# ----------------------------------------------------------------------------- helpers
+def now_iso():
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec='seconds')
+
+
+def h(s, n=12):
+    return hashlib.sha1(str(s).encode()).hexdigest()[:n]
+
+
+def show_eid(e):
+    """entity id for output: BT platforms hashed exactly like ha-audit's report."""
+    eid, plat = e['entity_id'], e.get('platform')
+    return A.bt_mask(eid, plat) if A.is_bt_domain(plat) else eid
+
+
+ROUND2 = 'round2'
+ROUND2_ABOUT = ('HA cleanup round 2 (owner-approved poll): before-state per '
+                'group, written by ha-apply before each write. Deleted config entries/devices cannot be re-added '
+                'via the API (BLE/WiZ/phones can be re-paired); full undo = restore the HA backup "Before cleanup '
+                '2026-10-15" (15.10 23:38, predates rounds 1 and 2). Privacy-scrubbed.')
+
+
+def undo_save(group, record, section=None):
+    d = {}
+    if os.path.exists(UNDO):
+        with open(UNDO) as f:
+            d = json.load(f)
+    d.setdefault('about', 'HA cleanup 2026-10-15 (owner-approved poll): before-state per group, written by '
+                          'ha-apply before each write. Removed registry entries cannot be re-added via the API: '
+                          'full undo = restore the HA backup "Before cleanup 2026-10-15" (23:38). Privacy-scrubbed.')
+    if section:
+        sec = d.setdefault(section, {})
+        sec.setdefault('about', {ROUND2: ROUND2_ABOUT, 'round3': globals().get('ROUND3_ABOUT'),
+                                 'scene-rebuild': globals().get('SCENE_REBUILD_ABOUT')}.get(section) or section)
+        sec.setdefault('groups', {})[group] = record
+    else:
+        d.setdefault('groups', {})[group] = record
+    text, _late = A.privacy_gate(json.dumps(d, indent=1, ensure_ascii=False, default=str))
+    tmp = UNDO + '.tmp'
+    with open(tmp, 'w') as f:
+        f.write(text + '\n')
+    os.replace(tmp, UNDO)
+
+
+class Ctx:
+    def __init__(self, ws, rest):
+        self.ws, self.rest = ws, rest
+        self.refresh()
+        with open(AUDIT_JSON) as f:
+            self.audit = json.load(f)
+
+    def refresh(self):
+        self.reg = {e['entity_id']: e for e in self.ws.call('config/entity_registry/list')}
+        self.devs = {d['id']: d for d in self.ws.call('config/device_registry/list')}
+        self.entries = {e['entry_id']: e for e in self.ws.call('config_entries/get')}
+        sts = self.ws.call('get_states')
+        self.states = {s['entity_id']: s.get('state') for s in sts}
+        self.attrs = {s['entity_id']: s.get('attributes') or {} for s in sts}  # in memory only, never printed
+
+    def dev_entities(self, dev_id):
+        return [e for e in self.reg.values() if e.get('device_id') == dev_id]
+
+    def entry_domain(self, entry_id):
+        return (self.entries.get(entry_id) or {}).get('domain')
+
+
+def p(*a):
+    print(*a, flush=True)
+
+
+# ----------------------------------------------------------------------------- groups
+def g_orphans(c, guard, apply):
+    want = [o['entity_id'] for o in c.audit['orphans']]
+    mask = {A.bt_mask(e['entity_id'], e.get('platform')): e['entity_id']
+            for e in c.reg.values() if A.is_bt_domain(e.get('platform'))}
+    targets, skipped = [], []
+    for w in want:
+        eid = mask.get(w, w)
+        e = c.reg.get(eid)
+        if not e:
+            skipped.append((w, 'already gone from the registry'))
+            continue
+        st = c.states.get(eid)
+        if e.get('platform') not in ('ibeacon', 'cast'):
+            skipped.append((w, f"platform {e.get('platform')} is not ibeacon/cast"))
+        elif st not in (None, 'unavailable'):
+            skipped.append((w, f'state is now {st}'))
+        else:
+            targets.append(e)
+    tids = {e['entity_id'] for e in targets}
+    devices = []
+    for dev_id in sorted({e['device_id'] for e in targets if e.get('device_id')}):
+        d = c.devs.get(dev_id)
+        rest_ents = [x for x in c.dev_entities(dev_id) if x['entity_id'] not in tids]
+        doms = {c.entry_domain(x) for x in (d or {}).get('config_entries', [])}
+        if d and not rest_ents and doms <= {'ibeacon', 'cast'}:
+            devices.append(d)
+        elif d:
+            skipped.append((f'device {dev_id[:10]}', f'keeps {len(rest_ents)} other entities or other integrations'))
+    by_plat = {}
+    for e in targets:
+        by_plat[e['platform']] = by_plat.get(e['platform'], 0) + 1
+    p(f'orphans: {len(targets)} entities to remove {by_plat}, then {len(devices)} now-empty devices')
+    for e in targets:
+        p('  -', show_eid(e), f"({c.states.get(e['entity_id']) or 'no state'})")
+
+    def dname(d):
+        doms = {c.entry_domain(x) for x in d.get('config_entries', [])}
+        return f"ibeacon device {h(d['id'], 6)}" if 'ibeacon' in doms else A.scrub(d.get('name_by_user') or d.get('name'))
+    for d in devices:
+        p('  - device:', dname(d), d['id'][:10])
+    for s in skipped:
+        p('  skip:', *s)
+    if not apply:
+        return
+    before = {
+        'at': now_iso(),
+        'entities': [{'entity_id': show_eid(e), 'platform': e.get('platform'), 'device_id': e.get('device_id'),
+                      'config_entry_id': e.get('config_entry_id'), 'disabled_by': e.get('disabled_by'),
+                      'area_id': e.get('area_id'),
+                      'name': None if A.is_bt_domain(e.get('platform')) else A.scrub(e.get('name') or e.get('original_name')),
+                      'unique_id_sha1': h(e.get('unique_id'))} for e in targets],
+        'devices': [{'device_id': d['id'], 'name': dname(d), 'model': d.get('model'),
+                     'manufacturer': A.scrub(d.get('manufacturer')), 'area_id': d.get('area_id'),
+                     'config_entries': d.get('config_entries')} for d in devices],
+    }
+    undo_save('orphans', {'before': before})
+    done_e, done_d, errors = [], [], []
+    for e in targets:
+        guard.approve(('config/entity_registry/remove', e['entity_id']))
+        try:
+            c.ws.call('config/entity_registry/remove', entity_id=e['entity_id'])
+            done_e.append(show_eid(e))
+        except A.HAError as ex:
+            errors.append(f'{show_eid(e)}: {ex}')
+    for d in devices:
+        for ce in d.get('config_entries', []):
+            guard.approve(('config/device_registry/remove_config_entry', d['id'], ce))
+            try:
+                c.ws.call('config/device_registry/remove_config_entry', device_id=d['id'], config_entry_id=ce)
+                done_d.append(dname(d))
+            except A.HAError as ex:
+                errors.append(f'device {dname(d)}: {ex}')
+    c.refresh()
+    left_e = [show_eid(e) for e in targets if e['entity_id'] in c.reg]
+    left_d = [dname(d) for d in devices if d['id'] in c.devs]
+    verify = {'entities_left': left_e, 'devices_left': left_d, 'ok': not left_e and not left_d}
+    undo_save('orphans', {'before': before, 'applied': {'entities': done_e, 'devices': done_d, 'errors': errors},
+                          'verify': verify})
+    p(f'applied: {len(done_e)} entities, {len(done_d)} devices removed; errors {len(errors)}')
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if verify['ok'] else f'still present: {left_e + left_d}')
+
+
+
+def _profile_phones():
+    """(ha_user, ha_phone, ha_keep_models) from the private profile; None when it can't be read (a copy without
+    bin/lib, a broken profile): the phone groups then refuse instead of guessing."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib'))
+        import assistant_profile
+        return (str(assistant_profile.get('services.ha_user')), str(assistant_profile.get('services.ha_phone')),
+                frozenset(str(m) for m in assistant_profile.get('services.ha_keep_models')))
+    except Exception:
+        return None
+
+
+def _slug(s):
+    return re.sub(r'[^a-z0-9]+', '_', s.lower()).strip('_')
+
+
+_PHONES = _profile_phones()
+
+
+def _phones_cfg():
+    if not _PHONES or not _PHONES[0] or not _PHONES[1]:
+        raise SystemExit('refusing: profile services.ha_user/ha_phone unreadable (bin/lib/assistant_profile)')
+    return _PHONES
+
+
+def _phone_trackers():
+    """(old trackers to unlink, the tracker that must stay) for the owner's HA person (profile)"""
+    user, phone, _ = _phones_cfg()
+    u = _slug(user)
+    return (f'device_tracker.galaxy_s20_fe_{u}', f'device_tracker.galaxy_24_ultra_{u}'), f'device_tracker.{u}_{_slug(phone)}'
+
+
+def _owner_person(c):
+    user = _phones_cfg()[0]
+    pent = 'person.' + _slug(user)
+    pe = c.reg.get(pent)
+    if not pe:
+        raise SystemExit(f'{pent} not in the entity registry')
+    pid = pe.get('unique_id')
+    persons = c.ws.call('person/list')
+    match = [x for x in persons.get('storage', []) if x.get('id') == pid]
+    if len(match) != 1:
+        raise SystemExit(f'{pent} is not a UI (storage) person; cannot update via the API')
+    person = match[0]
+    if _slug(user) not in _slug(person.get('name') or ''):
+        raise SystemExit('refusing: resolved person is not the owner (profile services.ha_user)')
+    return person
+
+
+def g_phones(c, guard, apply):
+    drop, keep = _phone_trackers()
+    person = _owner_person(c)
+    old = list(person.get('device_trackers') or [])
+    new = [t for t in old if t not in drop]
+    p('phones: owner person trackers', old, '->', new)
+    if keep not in new:
+        raise SystemExit(f'refusing: {keep} would not remain linked')
+    if old == new:
+        p('  nothing to change')
+        return
+    if not apply:
+        return
+    before = {'at': now_iso(), 'person': 'person.' + _slug(_phones_cfg()[0]), 'person_id': person['id'],
+              'device_trackers': old}
+    undo_save('phones', {'before': before})
+    guard.approve(('person/update', person['id']))
+    c.ws.call('person/update', person_id=person['id'], name=person['name'], user_id=person.get('user_id'),
+              device_trackers=new, picture=person.get('picture'))
+    after = list(_owner_person(c).get('device_trackers') or [])
+    ok = after == new
+    undo_save('phones', {'before': before, 'applied': {'device_trackers': new},
+                         'verify': {'device_trackers': after, 'ok': ok}})
+    p('verify:', 'OK' if ok else 'MISMATCH', after)
+
+
+ZHA_EXPECT = {'LCA004': 3, 'LCA006': 2, 'TRADFRI bulb E14 CWS 470lm': 3, 'RODRET Dimmer': 3, 'TS011F': 2}
+
+
+def g_zigbee(c, guard, apply):
+    want = [d for d in c.audit['dev_dead'] if d.get('integration') == 'zha']
+    got = {}
+    for d in want:
+        got[d.get('model')] = got.get(d.get('model'), 0) + 1
+    if got != ZHA_EXPECT or len(want) != 13:
+        raise SystemExit(f'refusing: audit zha dead devices {got} != approved {ZHA_EXPECT}')
+    zha_entries = [e for e in c.entries.values() if e.get('domain') == 'zha']
+    if len(zha_entries) != 1:
+        raise SystemExit(f'expected one ZHA config entry, found {len(zha_entries)}')
+    zentry = zha_entries[0]
+    use_registry = bool(zentry.get('supports_remove_device'))
+    p(f"zigbee: ZHA entry state {zentry.get('state')}, removal via "
+      f"{'device_registry/remove_config_entry' if use_registry else 'service zha.remove'}")
+    targets, skipped = [], []
+    for w in want:
+        d = c.devs.get(w['id'])
+        if not d:
+            skipped.append((w['name'], 'already gone'))
+            continue
+        ieee = next((i[1] for i in d.get('identifiers', []) if i and i[0] == 'zha'), None)
+        ents = [e for e in c.dev_entities(d['id']) if not e.get('disabled_by')]
+        alive = [e['entity_id'] for e in ents if c.states.get(e['entity_id']) not in (None, 'unavailable', 'unknown')]
+        if not ieee:
+            skipped.append((w['name'], 'no zha identifier'))
+        elif zentry['entry_id'] not in d.get('config_entries', []):
+            skipped.append((w['name'], 'not on the ZHA entry'))
+        elif alive:
+            skipped.append((w['name'], f'came back: {alive[:2]}'))
+        else:
+            targets.append((d, ieee, ents))
+    p(f'  {len(targets)} devices to remove')
+    for d, _ieee, ents in targets:
+        p('  -', d['id'][:10], A.scrub(d.get('name_by_user') or d.get('name')), '|', d.get('model'), f'| {len(ents)} entities')
+    for s in skipped:
+        p('  skip:', *s)
+    if not apply:
+        return
+    before = {'at': now_iso(), 'method': 'device_registry/remove_config_entry' if use_registry else 'zha.remove',
+              'devices': [{'device_id': d['id'], 'name': A.scrub(d.get('name_by_user') or d.get('name')),
+                           'model': d.get('model'), 'manufacturer': A.scrub(d.get('manufacturer')),
+                           'area_id': d.get('area_id'), 'ieee_sha1': h(ieee),
+                           'entities': [e['entity_id'] for e in c.dev_entities(d['id'])]} for d, ieee, _ in targets]}
+    undo_save('zigbee', {'before': before})
+    done, errors = [], []
+    for d, ieee, _ in targets:
+        try:
+            if use_registry:
+                guard.approve(('config/device_registry/remove_config_entry', d['id'], zentry['entry_id']))
+                c.ws.call('config/device_registry/remove_config_entry', device_id=d['id'],
+                          config_entry_id=zentry['entry_id'])
+            else:
+                key = target_key('call_service', {'domain': 'zha', 'service': 'remove', 'service_data': {'ieee': ieee}})
+                guard.approve(key)
+                c.ws.call('call_service', domain='zha', service='remove', service_data={'ieee': ieee})
+            done.append(d['id'])
+        except A.HAError as ex:
+            errors.append(f"{d['id'][:10]} {d.get('model')}: {ex}")
+    left = []
+    for _ in range(10):
+        c.refresh()
+        left = [i for i in done if i in c.devs]
+        if not left:
+            break
+        time.sleep(3)
+    ok = not left and not errors
+    undo_save('zigbee', {'before': before, 'applied': {'removed': done, 'errors': errors},
+                         'verify': {'devices_left': left, 'ok': ok}})
+    p(f'applied: {len(done)} removal calls; errors {len(errors)}')
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else f'still in registry: {[i[:10] for i in left]}')
+
+
+HALLWAY = 'automation.hallway_lights_on_presence'
+MISSING_LIGHT = 'light.hallway_lights'
+
+
+def _walk_replace(obj, old, new):
+    if isinstance(obj, str):
+        return new if obj == old else obj
+    if isinstance(obj, list):
+        return [_walk_replace(x, old, new) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _walk_replace(v, old, new) for k, v in obj.items()}
+    return obj
+
+
+def _count(obj, s):
+    return json.dumps(obj).count(json.dumps(s))
+
+
+def g_hallway(c, guard, apply, replace=None, show_only=False):
+    st = c.rest.request('GET', f'/api/states/{HALLWAY}')
+    aid = (st.get('attributes') or {}).get('id')
+    cfg = c.rest.request('GET', f'/api/config/automation/config/{aid}')
+    n_refs = _count(cfg, MISSING_LIGHT)
+    areas = {a['area_id']: a.get('name') for a in c.ws.call('config/area_registry/list')}
+    hall = [k for k, v in areas.items() if re.search(r'hall|flur|gang|korridor|entr', (v or '') + k, re.I)]
+    p(f"hallway: {HALLWAY} is {st.get('state')}, refs to {MISSING_LIGHT}: {n_refs}, "
+      f"still in registry: {MISSING_LIGHT in c.reg}; hallway-like areas: {[areas[a] for a in hall]}")
+    cands = []
+    for e in c.reg.values():
+        if not e['entity_id'].startswith('light.'):
+            continue
+        dev = c.devs.get(e.get('device_id')) or {}
+        area = e.get('area_id') or dev.get('area_id')
+        text = ' '.join(str(x) for x in (e['entity_id'], e.get('name'), e.get('original_name'), dev.get('name'),
+                                          dev.get('name_by_user')))
+        if area in hall or re.search(r'hall|flur|gang|stair|treppe|entr', text, re.I):
+            cands.append((e['entity_id'], areas.get(area), e.get('platform'), c.states.get(e['entity_id']),
+                          e.get('disabled_by')))
+    p('  candidate lights (entity, area, platform, state, disabled_by):')
+    for x in sorted(cands):
+        p('   ', *x)
+    trig = [t for t in re.findall(r'"((?:binary_)?sensor\.[a-z0-9_]+)"', json.dumps(cfg.get('triggers', cfg.get('trigger'))))]
+    p('  trigger entities:', [(t, c.states.get(t)) for t in trig])
+    p('  config summary: actions refs', sorted(set(re.findall(r'"([a-z_]+\.[a-z0-9_]+)"', json.dumps(cfg.get('actions', cfg.get('action')))))))
+    if show_only or not apply:
+        return
+    before = {'at': now_iso(), 'entity_id': HALLWAY, 'automation_id': aid, 'state': st.get('state'),
+              'config': json.loads(A.scrub(json.dumps(cfg)))}
+    undo_save('hallway', {'before': before})
+    if replace:
+        if not re.fullmatch(r'light\.[a-z0-9_]+', replace) or replace not in c.reg:
+            raise SystemExit(f'--replace {replace}: not a registered light')
+        new = _walk_replace(cfg, MISSING_LIGHT, replace)
+        path = f'/api/config/automation/config/{aid}'
+        guard.approve(('rest', 'POST', path))
+        c.rest.request('POST', path, new)
+        after = c.rest.request('GET', path)
+        ok = _count(after, MISSING_LIGHT) == 0 and _count(after, replace) >= n_refs
+        undo_save('hallway', {'before': before, 'applied': {'replaced': [MISSING_LIGHT, replace]},
+                              'verify': {'ok': ok}})
+        p('verify:', 'OK' if ok else 'MISMATCH')
+        return
+    if st.get('state') == 'on':
+        key = target_key('call_service', {'domain': 'automation', 'service': 'turn_off',
+                                          'service_data': {'entity_id': HALLWAY}})
+        guard.approve(key)
+        c.ws.call('call_service', domain='automation', service='turn_off', service_data={'entity_id': HALLWAY})
+    after = c.rest.request('GET', f'/api/states/{HALLWAY}').get('state')
+    cfg_after = c.rest.request('GET', f'/api/config/automation/config/{aid}')
+    ok = after == 'off' and cfg_after is not None
+    undo_save('hallway', {'before': before, 'applied': {'action': 'kept off (no unambiguous replacement)'},
+                          'verify': {'state': after, 'config_still_exists': cfg_after is not None, 'ok': ok}})
+    p('verify:', 'OK' if ok else 'MISMATCH', 'state', after, '| config kept')
+
+
+def _bk_view(info):
+    cfg = (info or {}).get('config', {})
+    cb = dict(cfg.get('create_backup') or {})
+    cb['password'] = 'set' if cb.get('password') else 'none'
+    return {'create_backup': cb, 'retention': cfg.get('retention'), 'schedule': cfg.get('schedule'),
+            'automatic_backups_configured': cfg.get('automatic_backups_configured'),
+            'last_attempted_automatic_backup': cfg.get('last_attempted_automatic_backup'),
+            'last_completed_automatic_backup': cfg.get('last_completed_automatic_backup'),
+            'next_automatic_backup': cfg.get('next_automatic_backup'),
+            'agents': sorted((cfg.get('agents') or {}).keys())}
+
+
+def g_backup_config(c, guard, apply, show_only=False):
+    info = c.ws.call('backup/config/info')
+    agents = [a.get('agent_id') for a in (c.ws.call('backup/agents/info') or {}).get('agents', [])]
+    view = _bk_view(info)
+    p('backup-config now:', json.dumps(view, indent=1))
+    p('agents available:', agents)
+    if show_only:
+        return
+    local = 'hassio.local' if 'hassio.local' in agents else 'backup.local'
+    if local not in agents:
+        raise SystemExit('no local backup agent found')
+    cur_ids = list((view['create_backup'] or {}).get('agent_ids') or [])
+    agent_ids = cur_ids + [local] if local not in cur_ids else cur_ids
+    upd = {'create_backup': {'agent_ids': agent_ids, 'include_all_addons': True, 'include_addons': None,
+                             'include_database': True},
+           'retention': {'copies': 7, 'days': None},
+           'schedule': {'recurrence': 'daily', 'time': '03:15:00', 'days': []},
+           'automatic_backups_configured': True}
+    p('planned update:', json.dumps(upd))
+    if not apply:
+        return
+    before = {'at': now_iso(), 'config': view}
+    undo_save('backup-config', {'before': before})
+    guard.approve(('backup/config/update',))
+    c.ws.call('backup/config/update', **upd)
+    after = _bk_view(c.ws.call('backup/config/info'))
+    cb, sch = after['create_backup'], after['schedule'] or {}
+    ok = (local in (cb.get('agent_ids') or []) and cb.get('include_all_addons') is True
+          and cb.get('include_database') is True and (after['retention'] or {}).get('copies') == 7
+          and sch.get('recurrence') == 'daily' and str(sch.get('time') or '').startswith('03:15'))
+    undo_save('backup-config', {'before': before, 'applied': upd, 'verify': {'config': after, 'ok': ok}})
+    p('after:', json.dumps(after, indent=1))
+    p('verify:', 'OK' if ok else 'MISMATCH')
+
+
+# ----------------------------------------------------------------------------- round 2
+PLANT_MODEL = 'HHCCJCY01'
+OLD_PHONE_MODELS = {'SM-G781B': 'Galaxy S20 FE', 'SM-S928B': 'Galaxy 24 Ultra'}
+DEAD = (None, 'unavailable')
+
+
+def _entry_devs(c, entry_id):
+    return [d for d in c.devs.values() if entry_id in (d.get('config_entries') or [])]
+
+
+def _entry_ents(c, entry_id):
+    return [x for x in c.reg.values() if x.get('config_entry_id') == entry_id]
+
+
+def _live(c, ents):
+    """enabled entities that currently report a real state (not unavailable / no state)"""
+    return [x['entity_id'] for x in ents if not x.get('disabled_by') and c.states.get(x['entity_id']) not in DEAD]
+
+
+def _person_trackers(c):
+    pl = c.ws.call('person/list') or {}
+    return {t for kind in ('storage', 'config') for pp in (pl.get(kind) or []) for t in (pp.get('device_trackers') or [])}
+
+
+def _settle(c, still):
+    """re-read the registries until still() is empty (<= ~30 s); returns what is left"""
+    left = []
+    for _ in range(10):
+        c.refresh()
+        left = still()
+        if not left:
+            break
+        time.sleep(3)
+    return left
+
+
+def sel_plants(c):
+    want = [e['entry_id'] for e in c.audit['int_dead'] if e.get('domain') == 'xiaomi_ble']
+    if len(want) != 6:
+        raise SystemExit(f'refusing: audit lists {len(want)} xiaomi_ble entries, the owner approved 6')
+    targets, skipped = [], []
+    for eid in want:
+        e, lab = c.entries.get(eid), f'plant sensor {h(eid, 6)}'
+        if not e:
+            skipped.append((lab, 'already gone'))
+            continue
+        devs, ents = _entry_devs(c, eid), _entry_ents(c, eid)
+        if e.get('domain') != 'xiaomi_ble':
+            skipped.append((lab, f"domain {e.get('domain')} is not xiaomi_ble"))
+        elif len(devs) != 1 or devs[0].get('model') != PLANT_MODEL:
+            skipped.append((lab, f'devices {[d.get("model") for d in devs]} are not one {PLANT_MODEL}'))
+        elif len(devs[0].get('config_entries') or []) != 1:
+            skipped.append((lab, 'device is shared with another integration'))
+        elif _live(c, ents):
+            skipped.append((lab, f'came back: {len(_live(c, ents))} entities report again'))
+        else:
+            targets.append(e)
+    return targets, skipped
+
+
+def sel_wiz(c):
+    aud = {e['entry_id'] for e in c.audit['int_failing'] if e.get('domain') == 'wiz'}
+    wiz = [e for e in c.entries.values() if e.get('domain') == 'wiz']
+    skipped = [(f"WiZ entry {h(e['entry_id'], 6)}", 'loaded (working), kept') for e in wiz if e.get('state') == 'loaded']
+    off = [e for e in wiz if e.get('state') != 'loaded']
+    if not off:
+        return [], skipped + [('wiz', 'no offline WiZ entry (already gone or back online)')]
+    if len(off) > 1:
+        raise SystemExit(f'refusing: {len(off)} WiZ entries are not loaded; the approval was for exactly one')
+    e = off[0]
+    if e['entry_id'] not in aud:
+        raise SystemExit('refusing: the offline WiZ entry is not the one the audit reported')
+    devs, ents = _entry_devs(c, e['entry_id']), _entry_ents(c, e['entry_id'])
+    if any(len(d.get('config_entries') or []) != 1 for d in devs):
+        return [], skipped + [('offline WiZ socket', 'device is shared with another integration')]
+    if _live(c, ents):
+        return [], skipped + [('offline WiZ socket', f'reports again: {len(_live(c, ents))} entities')]
+    return [e], skipped
+
+
+def sel_ibeacon(c):
+    want = [d['id'] for d in c.audit['dev_dead'] if d.get('integration') == 'ibeacon']
+    if len(want) != 6:
+        raise SystemExit(f'refusing: audit lists {len(want)} dead iBeacon devices, the owner approved 6')
+    ib = [e for e in c.entries.values() if e.get('domain') == 'ibeacon']
+    if len(ib) != 1:
+        raise SystemExit(f'expected one iBeacon config entry, found {len(ib)}')
+    entry = ib[0]
+    if not entry.get('supports_remove_device'):
+        raise SystemExit('refusing: the iBeacon entry does not support device removal')
+    targets, skipped = [], []
+    for did in want:
+        d, lab = c.devs.get(did), f'ibeacon device {h(did, 6)}'
+        if not d:
+            skipped.append((lab, 'already gone'))
+            continue
+        ents = c.dev_entities(did)
+        notdis = [x for x in ents if x.get('disabled_by') != 'integration']
+        if set(d.get('config_entries') or []) != {entry['entry_id']}:
+            skipped.append((lab, 'belongs to other integrations too'))
+        elif notdis:
+            skipped.append((lab, f'{len(notdis)} entities are not integration-disabled'))
+        else:
+            targets.append(d)
+    return entry, targets, skipped
+
+
+def sel_old_phones(c):
+    aud = [ph for ph in c.audit['phones'] if ph.get('model') in OLD_PHONE_MODELS]
+    if sorted(ph['model'] for ph in aud) != sorted(OLD_PHONE_MODELS):
+        raise SystemExit('refusing: the audit does not list exactly the two approved old phones')
+    linked = _person_trackers(c)
+    targets, skipped = [], []
+    for ph in aud:
+        lab = OLD_PHONE_MODELS[ph['model']]
+        if len(ph.get('entry_ids') or []) != 1:
+            skipped.append((lab, 'not exactly one config entry'))
+            continue
+        eid = ph['entry_ids'][0]
+        e = c.entries.get(eid)
+        if not e:
+            skipped.append((lab, 'already gone'))
+            continue
+        devs, ents = _entry_devs(c, eid), _entry_ents(c, eid)
+        models = {d.get('model') for d in devs}
+        keep = _phones_cfg()[2]      # profile services.ha_keep_models: never touched
+        if models & keep:
+            raise SystemExit(f'refusing: entry for {lab} carries a protected phone model {sorted(models & keep)}')
+        if e.get('domain') != 'mobile_app':
+            skipped.append((lab, f"domain {e.get('domain')} is not mobile_app"))
+        elif models != {ph['model']} or [d['id'] for d in devs] != [ph['id']]:
+            skipped.append((lab, f'devices {sorted(map(str, models))} do not match the audit'))
+        elif linked & {x['entity_id'] for x in ents}:
+            skipped.append((lab, 'a tracker is still linked to a person'))
+        else:
+            targets.append(e)
+    return targets, skipped
+
+
+def _entry_before(c, e, named):
+    devs, ents = _entry_devs(c, e['entry_id']), _entry_ents(c, e['entry_id'])
+    return {'entry_id': e['entry_id'], 'domain': e.get('domain'),
+            'title': A.scrub(e.get('title')) if named else None, 'title_sha1': h(e.get('title')),
+            'state': e.get('state'), 'source': e.get('source'), 'disabled_by': e.get('disabled_by'),
+            'devices': [{'device_id': d['id'], 'name': A.scrub(d.get('name_by_user') or d.get('name')) if named else None,
+                         'model': d.get('model'), 'manufacturer': A.scrub(d.get('manufacturer')),
+                         'area_id': d.get('area_id'), 'config_entries': d.get('config_entries')} for d in devs],
+            'n_entities': len(ents),
+            'entities': [{'entity_id': show_eid(x), 'platform': x.get('platform'), 'disabled_by': x.get('disabled_by'),
+                          'hidden_by': x.get('hidden_by'), 'area_id': x.get('area_id')} for x in ents]}
+
+
+def _delete_entries(c, guard, group, targets, label, named):
+    """REST DELETE each approved config entry; HA drops its devices and entities with it."""
+    before = {'at': now_iso(), 'method': 'REST DELETE /api/config/config_entries/entry/<entry_id>',
+              'entries': [_entry_before(c, e, named) for e in targets]}
+    undo_save(group, {'before': before}, section=ROUND2)
+    ids = [e['entry_id'] for e in targets]
+    devs = {d['id'] for i in ids for d in _entry_devs(c, i) if len(d.get('config_entries') or []) == 1}
+    ents = {x['entity_id'] for i in ids for x in _entry_ents(c, i)}
+    done, errors, restart = [], [], []
+    for e in targets:
+        path = '/api/config/config_entries/entry/' + e['entry_id']
+        guard.approve(('rest', 'DELETE', path))
+        try:
+            r = c.rest.request('DELETE', path) or {}
+            done.append(label(e))
+            if r.get('require_restart'):
+                restart.append(label(e))
+        except A.HAError as ex:
+            errors.append(f'{label(e)}: {ex}')
+    left = _settle(c, lambda: [label(e) for e in targets if e['entry_id'] in c.entries]
+                   + [f'device {h(i, 6)}' for i in devs if i in c.devs]
+                   + [f'{sum(1 for x in ents if x in c.reg)} entities'] * any(x in c.reg for x in ents))
+    ok = not left and not errors
+    undo_save(group, {'before': before, 'applied': {'deleted_entries': done, 'errors': errors,
+                                                    'require_restart': restart},
+                      'verify': {'left': left, 'entries_gone': len(ids) - sum(1 for i in ids if i in c.entries),
+                                 'devices_gone': len(devs) - sum(1 for i in devs if i in c.devs),
+                                 'entities_gone': len(ents) - sum(1 for x in ents if x in c.reg), 'ok': ok}},
+              section=ROUND2)
+    p(f'applied: {len(done)} config entries deleted ({len(devs)} devices, {len(ents)} entities with them); '
+      f'errors {len(errors)}' + (f'; restart needed for {restart}' if restart else ''))
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else f'still present: {left}')
+
+
+def g_plants(c, guard, apply):
+    targets, skipped = sel_plants(c)
+    lab = lambda e: f"plant sensor {h(e['entry_id'], 6)}"  # noqa: E731
+    p(f'plants: {len(targets)} xiaomi_ble config entries to delete ({PLANT_MODEL}, one device each)')
+    for e in targets:
+        d = _entry_devs(c, e['entry_id'])[0]
+        p('  -', lab(e), f"| area {d.get('area_id') or '-'} | {len(_entry_ents(c, e['entry_id']))} entities, none reporting")
+    for s in skipped:
+        p('  skip:', *s)
+    if apply and targets:
+        _delete_entries(c, guard, 'plants', targets, lab, named=False)
+
+
+def g_wiz(c, guard, apply):
+    targets, skipped = sel_wiz(c)
+    lab = lambda e: 'offline WiZ socket'  # noqa: E731
+    p(f'wiz: {len(targets)} offline WiZ config entry to delete')
+    for e in targets:
+        p('  -', lab(e), f"| state {e.get('state')} | {[d.get('model') for d in _entry_devs(c, e['entry_id'])]}",
+          f"| {len(_entry_ents(c, e['entry_id']))} entities, none reporting")
+    for s in skipped:
+        p('  skip:', *s)
+    if apply and targets:
+        _delete_entries(c, guard, 'wiz', targets, lab, named=False)
+
+
+def g_old_phones(c, guard, apply):
+    targets, skipped = sel_old_phones(c)
+    lab = lambda e: A.scrub(e.get('title'))  # noqa: E731
+    p(f'old-phones: {len(targets)} mobile_app config entries to delete (not linked to any person)')
+    for e in targets:
+        p('  -', lab(e), '|', [d.get('model') for d in _entry_devs(c, e['entry_id'])],
+          f"| {len(_entry_ents(c, e['entry_id']))} entities")
+    for s in skipped:
+        p('  skip:', *s)
+    if apply and targets:
+        _delete_entries(c, guard, 'old-phones', targets, lab, named=True)
+
+
+def g_ibeacon(c, guard, apply):
+    entry, targets, skipped = sel_ibeacon(c)
+    lab = lambda d: f"ibeacon device {h(d['id'], 6)}"  # noqa: E731
+    tids = {d['id'] for d in targets}
+    others = [d['id'] for d in _entry_devs(c, entry['entry_id']) if d['id'] not in tids]
+    p(f'ibeacon: {len(targets)} shell devices to remove; the iBeacon entry and {len(others)} other device(s) stay')
+    for d in targets:
+        p('  -', lab(d), f'| {len(c.dev_entities(d["id"]))} entities, all integration-disabled')
+    for s in skipped:
+        p('  skip:', *s)
+    if not apply or not targets:
+        return
+    before = {'at': now_iso(), 'method': 'config/device_registry/remove_config_entry', 'entry_id': entry['entry_id'],
+              'devices': [{'device_id': d['id'], 'name': lab(d), 'model': d.get('model'), 'area_id': d.get('area_id'),
+                           'config_entries': d.get('config_entries'),
+                           'entities': [{'entity_id': show_eid(x), 'platform': x.get('platform'),
+                                         'disabled_by': x.get('disabled_by'), 'unique_id_sha1': h(x.get('unique_id'))}
+                                        for x in c.dev_entities(d['id'])]} for d in targets]}
+    ents = {x['entity_id'] for d in targets for x in c.dev_entities(d['id'])}
+    undo_save('ibeacon', {'before': before}, section=ROUND2)
+    done, errors = [], []
+    for d in targets:
+        guard.approve(('config/device_registry/remove_config_entry', d['id'], entry['entry_id']))
+        try:
+            c.ws.call('config/device_registry/remove_config_entry', device_id=d['id'], config_entry_id=entry['entry_id'])
+            done.append(lab(d))
+        except A.HAError as ex:
+            errors.append(f'{lab(d)}: {ex}')
+    left = _settle(c, lambda: [lab(d) for d in targets if d['id'] in c.devs]
+                   + [f'{sum(1 for x in ents if x in c.reg)} entities'] * any(x in c.reg for x in ents))
+    kept = entry['entry_id'] in c.entries and all(i in c.devs for i in others)
+    ok = not left and not errors and kept
+    undo_save('ibeacon', {'before': before, 'applied': {'removed': done, 'errors': errors},
+                          'verify': {'left': left, 'entry_and_other_devices_kept': kept, 'ok': ok}}, section=ROUND2)
+    p(f'applied: {len(done)} devices removed ({len(ents)} entities with them); errors {len(errors)}')
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else f'left {left}, entry/others kept {kept}')
+
+
+# ----------------------------------------------------------------------------- round 3
+ROUND3 = 'round3'
+ROUND3_ABOUT = ('HA cleanup round 3 (owner-approved poll, all 9 pass-2 actions; report '
+                'ha-cleanup-pass2-2026-10-16.md): before-state per group, written by ha-apply before each write. '
+                'Renames/areas/names/hidden: undo = rename back (old ids that contained the account e-mail slug are '
+                'stored as <email>). Deleted scene: scenes-removed-2026-10-16.json. Deleted helpers and HACS/add-on '
+                'changes: re-create/re-download/start by hand, or the HA backup "Before cleanup 2026-10-15". '
+                'Privacy-scrubbed.')
+GEN_DASH = 'home-mobile'  # owned by ha-dashboard-gen: never edited here, it is regenerated instead
+
+
+def canon(x):
+    return json.dumps(x, sort_keys=True, default=str)
+
+
+def _obj(eid):
+    return eid.split('.', 1)[1]
+
+
+def _dom(eid):
+    return eid.split('.', 1)[0]
+
+
+def _free(c, eid):
+    return eid not in c.reg and eid not in c.states
+
+
+def _attrs(c, eid):
+    return (getattr(c, 'attrs', None) or {}).get(eid) or {}
+
+
+def _ref_rx(old):
+    return re.compile(r'(?<![a-z0-9_.])' + re.escape(old) + r'(?![a-z0-9_])')
+
+
+def _replace_refs(obj, rxs):
+    """returns (new_obj, n) with every exact entity-id occurrence inside string values replaced"""
+    if isinstance(obj, str):
+        n = 0
+        for rx, new in rxs:
+            obj, k = rx.subn(new, obj)
+            n += k
+        return obj, n
+    if isinstance(obj, list):
+        out, n = [], 0
+        for x in obj:
+            y, k = _replace_refs(x, rxs)
+            out.append(y)
+            n += k
+        return out, n
+    if isinstance(obj, dict):
+        out, n = {}, 0
+        for key, x in obj.items():
+            y, k = _replace_refs(x, rxs)
+            out[key] = y
+            n += k
+        return out, n
+    return obj, 0
+
+
+def _dashboards(c):
+    """stored dashboards except the generated one: [(url_path or None, config)]"""
+    out = []
+    for d in c.ws.call('lovelace/dashboards/list') or []:
+        if d.get('mode') == 'storage' and d.get('url_path') != GEN_DASH:
+            try:
+                out.append((d['url_path'], c.ws.call('lovelace/config', url_path=d['url_path'], force=False)))
+            except A.HAError:
+                pass
+    try:
+        out.append((None, c.ws.call('lovelace/config', force=False)))  # default dashboard (if stored)
+    except A.HAError:
+        pass
+    return out
+
+
+def _automations(c):
+    out = []
+    for eid in sorted(x for x in c.states if x.startswith('automation.')):
+        aid = _attrs(c, eid).get('id')
+        if aid and re.fullmatch(r'[A-Za-z0-9_.\-]{1,80}', str(aid)):
+            try:
+                out.append((eid, str(aid), c.rest.request('GET', f'/api/config/automation/config/{aid}')))
+            except A.HAError:
+                pass
+    return out
+
+
+def _count_refs(c, ids):
+    """{place: n} of exact references to ids in stored dashboards (except the generated one) and automations"""
+    rxs = [(_ref_rx(o), o) for o in ids]
+    found = {}
+    for u, cfg in _dashboards(c):
+        n = _replace_refs(cfg, rxs)[1]
+        if n:
+            found[f'dashboard {u or "default"}'] = n
+    for eid, _aid, cfg in _automations(c):
+        n = _replace_refs(cfg, rxs)[1]
+        if n:
+            found[eid] = n
+    return found
+
+
+def _fix_refs(c, guard, mapping):
+    """rewrite exact old-id references in stored dashboards (not the generated one) and automation configs"""
+    rxs = [(_ref_rx(o), n) for o, n in mapping.items()]
+    done, errors = {}, []
+    for u, cfg in _dashboards(c):
+        new, n = _replace_refs(cfg, rxs)
+        if not n:
+            continue
+        msg = {'config': new} if u is None else {'url_path': u, 'config': new}
+        guard.approve(('lovelace/config/save', canon(msg)))
+        try:
+            c.ws.call('lovelace/config/save', **msg)
+            done[f'dashboard {u or "default"}'] = n
+        except A.HAError as ex:
+            errors.append(f'dashboard {u}: {ex}')
+    for eid, aid, cfg in _automations(c):
+        new, n = _replace_refs(cfg, rxs)
+        if not n:
+            continue
+        path = f'/api/config/automation/config/{aid}'
+        guard.approve(('rest', 'POST', path))
+        try:
+            c.rest.request('POST', path, new)
+            done[eid] = n
+        except A.HAError as ex:
+            errors.append(f'{eid}: {ex}')
+    return done, errors
+
+
+def _show_old(e_or_id):
+    return A.scrub(e_or_id if isinstance(e_or_id, str) else e_or_id['entity_id'])
+
+
+def _apply_renames(c, guard, group, dev_updates, renames, hide=()):
+    """dev_updates [(device_id, {name_by_user/area_id})], renames [(old, new)]; hide = new ids to hide"""
+    before = {'at': now_iso(), 'method': 'ws config/device_registry/update + config/entity_registry/update',
+              'devices': [{'device_id': did, 'name_by_user': A.scrub(c.devs[did].get('name_by_user')),
+                           'area_id': c.devs[did].get('area_id'), 'set': {k: A.scrub(v) for k, v in upd.items()}}
+                          for did, upd in dev_updates],
+              'entities': [{'old': _show_old(o), 'new': n, 'hidden_by': (c.reg.get(o) or {}).get('hidden_by'),
+                            'hide': n in hide} for o, n in renames]}
+    undo_save(group, {'before': before}, section=ROUND3)
+    errors, mapping = [], {}
+    for did, upd in dev_updates:
+        msg = dict(upd, device_id=did)
+        guard.approve(('config/device_registry/update', canon(msg)))
+        try:
+            c.ws.call('config/device_registry/update', **msg)
+        except A.HAError as ex:
+            errors.append(f'device {h(did, 6)}: {ex}')
+    hidden_only = []
+    for o, n in renames:
+        msg = {'entity_id': o} if o == n else {'entity_id': o, 'new_entity_id': n}
+        if n in hide:
+            msg['hidden_by'] = 'user'
+        guard.approve(('config/entity_registry/update', canon(msg)))
+        try:
+            c.ws.call('config/entity_registry/update', **msg)
+            if o == n:
+                hidden_only.append(n)
+            else:
+                mapping[o] = n
+        except A.HAError as ex:
+            errors.append(f'{_show_old(o)} -> {n}: {A.scrub(str(ex))}')
+    refs, ref_err = _fix_refs(c, guard, mapping) if mapping else ({}, [])
+    errors += ref_err
+
+    def still():
+        c.refresh()
+        bad = [f'{_show_old(o)} not renamed' for o, n in renames if n not in c.reg or (o != n and o in c.reg)]
+        bad += [f'{n} not hidden' for n in hide if (c.reg.get(n) or {}).get('hidden_by') != 'user']
+        for did, upd in dev_updates:
+            d = c.devs.get(did) or {}
+            bad += [f'device {h(did, 6)} {k}' for k, v in upd.items() if d.get(k) != v]
+        return bad
+    left = _settle(c, still)
+    left_refs = _count_refs(c, list(mapping)) if mapping else {}
+    ok = not left and not errors and not left_refs
+    undo_save(group, {'before': before, 'applied': {'renamed': len(mapping), 'devices': len(dev_updates),
+                                                    'refs_rewritten': refs, 'errors': errors},
+                      'verify': {'left': left, 'old_refs_left': left_refs, 'ok': ok}}, section=ROUND3)
+    p(f'applied: {len(dev_updates)} device updates, {len(mapping)}/{len([1 for o, n in renames if o != n])} entity ids renamed'
+      + (f', {len(hide)} hidden' if hide else '') + f'; references rewritten: {refs or "none needed"}')
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else f'left {left}, old refs left {left_refs}')
+    return ok
+
+
+def _print_renames(renames, hide=(), cap=200):
+    for o, n in renames[:cap]:
+        p(f'  {_show_old(o)} -> {n}' + (' (+hidden)' if n in hide else ''))
+
+
+def _check_new(c, renames):
+    """problems: target taken or duplicated"""
+    seen, bad = set(), []
+    olds = {o for o, _ in renames}
+    for o, n in renames:
+        if n in seen:
+            bad.append(f'{n}: two entities would get this id')
+        seen.add(n)
+        if not _free(c, n) and n not in olds:
+            bad.append(f'{n}: already taken')
+    return bad
+
+
+# --- 1 vacuum
+ECO_NAME = 'DEEBOT X9 Pro Omni'
+ECO_BASE = 'deebot'
+
+
+def sel_vacuum(c):
+    eco = [e for e in c.reg.values() if e.get('platform') == 'ecovacs']
+    vac = [e for e in eco if _dom(e['entity_id']) == 'vacuum']
+    if len(vac) != 1:
+        raise SystemExit(f'refusing: {len(vac)} Ecovacs vacuums (expected 1)')
+    pre = _obj(vac[0]['entity_id'])
+    renames, skipped = [], []
+    if pre != ECO_BASE:
+        for e in sorted(eco, key=lambda x: x['entity_id']):
+            d, o = _dom(e['entity_id']), _obj(e['entity_id'])
+            if o == pre or o.startswith(pre + '_'):
+                renames.append((e['entity_id'], f'{d}.{ECO_BASE}{o[len(pre):]}'))
+            else:
+                skipped.append((_show_old(e), 'does not start with the vacuum prefix'))
+    devs = {e.get('device_id') for e in eco if e.get('device_id')}
+    if len(devs) != 1:
+        raise SystemExit(f'refusing: Ecovacs entities sit on {len(devs)} devices (expected 1)')
+    did = devs.pop()
+    dev_updates = [] if c.devs[did].get('name_by_user') == ECO_NAME else [(did, {'name_by_user': ECO_NAME})]
+    return dev_updates, renames, skipped
+
+
+def g_vacuum(c, guard, apply):
+    dev_updates, renames, skipped = sel_vacuum(c)
+    bad = _check_new(c, renames)
+    p(f'vacuum: device name -> "{ECO_NAME}"' if dev_updates else 'vacuum: device name already clean',
+      f'| {len(renames)} entity ids to rename (old ids shown with <email>)')
+    _print_renames(renames)
+    for s in skipped:
+        p('  skip:', *s)
+    for b in bad:
+        p('  problem:', b)
+    p('  references to rewrite:', _count_refs(c, [o for o, _ in renames]) or 'none')
+    if bad:
+        raise SystemExit('refusing: fix the problems first')
+    if apply and (dev_updates or renames):
+        _apply_renames(c, guard, 'vacuum', dev_updates, renames)
+
+
+# --- 2 HACS
+HACS_REMOVE = {'basnijholt/adaptive-lighting', 'ui-lovelace-minimalist/ui', 'tomaae/homeassistant-mikrotik_router'}
+HACS_NEVER = {'piitaya/lovelace-mushroom', 'hacs/integration'}
+
+
+def _hacs_list(c):
+    r = c.ws.call('hacs/repositories/list')
+    return r if isinstance(r, list) else []
+
+
+def sel_hacs(c):
+    targets, skipped = [], []
+    domains = {e.get('domain') for e in c.entries.values()}
+    for r in _hacs_list(c):
+        fn = str(r.get('full_name') or '').lower()
+        if fn not in HACS_REMOVE or fn in HACS_NEVER:
+            continue
+        if not r.get('installed'):
+            skipped.append((r.get('full_name'), 'not installed (already removed)'))
+        elif r.get('category') != 'integration':
+            skipped.append((r.get('full_name'), f"category {r.get('category')} is not integration"))
+        elif r.get('domain') and r.get('domain') in domains:
+            skipped.append((r.get('full_name'), f"has a config entry ({r.get('domain')}): set up after all"))
+        else:
+            targets.append(r)
+    return targets, skipped
+
+
+def g_hacs(c, guard, apply):
+    targets, skipped = sel_hacs(c)
+    p(f'hacs: {len(targets)} never-set-up integrations to remove via HACS')
+    for r in targets:
+        p('  -', r.get('full_name'), f"(id {r.get('id')}, domain {r.get('domain')})")
+    for s in skipped:
+        p('  skip:', *s)
+    if not (apply and targets):
+        return
+    undo_save('hacs', {'before': {'at': now_iso(), 'method': 'ws hacs/repository/remove',
+                                  'repos': [{k: r.get(k) for k in ('id', 'full_name', 'category', 'domain',
+                                                                    'installed_version')} for r in targets]}},
+              section=ROUND3)
+    errors = []
+    for r in targets:
+        msg = {'repository': str(r['id'])}
+        guard.approve(('hacs/repository/remove', canon(msg)))
+        try:
+            c.ws.call('hacs/repository/remove', **msg)
+        except A.HAError as ex:
+            errors.append(f"{r.get('full_name')}: {ex}")
+    ids = {str(r['id']) for r in targets}
+    left = []
+    for _ in range(8):
+        left = [r.get('full_name') for r in _hacs_list(c) if str(r.get('id')) in ids and r.get('installed')]
+        if not left:
+            break
+        time.sleep(3)
+    kept = [r.get('full_name') for r in _hacs_list(c) if str(r.get('full_name')).lower() in HACS_NEVER and r.get('installed')]
+    ok = not left and not errors
+    undo_save('hacs', {'before': {'repos': [r.get('full_name') for r in targets]},
+                       'applied': {'removed': sorted(ids), 'errors': errors},
+                       'verify': {'still_installed': left, 'kept': kept, 'ok': ok}}, section=ROUND3)
+    p(f'applied: {len(targets) - len(errors)} removed; errors {errors or "none"}')
+    p('verify:', 'OK' if ok else f'still installed: {left}', f'| kept: {kept}')
+
+
+# --- 3 add-ons
+ADDONS_STOP = ('5c53de3b_esphome', 'core_matter_server')
+SUP_WRITE = re.compile(r'/addons/(?:5c53de3b_esphome|core_matter_server)/(?:stop|options)')
+
+
+def _addon(c, slug):
+    r = c.ws.call('supervisor/api', endpoint=f'/addons/{slug}/info', method='get') or {}
+    return {'state': r.get('state'), 'boot': r.get('boot'), 'name': r.get('name')}
+
+
+def g_addons(c, guard, apply):
+    info = {s: _addon(c, s) for s in ADDONS_STOP}
+    p('addons: stop + boot manual (not uninstalled)')
+    for s, i in info.items():
+        p(f"  - {s} ({i['name']}): state {i['state']}, boot {i['boot']}")
+    if not apply:
+        return
+    undo_save('addons', {'before': {'at': now_iso(), 'method': 'ws supervisor/api POST /addons/<slug>/options '
+                                    '{boot: manual} + /stop; undo: options {boot: auto} + /start', 'addons': info}},
+              section=ROUND3)
+    errors = []
+    for s, i in info.items():
+        steps = []
+        if i['boot'] != 'manual':
+            steps.append({'endpoint': f'/addons/{s}/options', 'method': 'post', 'data': {'boot': 'manual'}})
+        if i['state'] != 'stopped':
+            steps.append({'endpoint': f'/addons/{s}/stop', 'method': 'post', 'timeout': 120})
+        for msg in steps:
+            guard.approve(('supervisor/api', canon(msg)))
+            try:
+                c.ws.call('supervisor/api', **msg)
+            except A.HAError as ex:
+                errors.append(f"{s} {msg['endpoint'].rsplit('/', 1)[1]}: {ex}")
+    after = {s: _addon(c, s) for s in ADDONS_STOP}
+    ok = not errors and all(a['state'] != 'started' and a['boot'] == 'manual' for a in after.values())
+    undo_save('addons', {'before': {'addons': info}, 'applied': {'errors': errors},
+                         'verify': {'after': after, 'ok': ok}}, section=ROUND3)
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else 'NOT OK', {s: f"{a['state']}/{a['boot']}" for s, a in after.items()})
+
+
+# --- 4 Sonos
+SONOS_PLAN = {  # device name -> (area, new base, [(old prefix, required trailing suffix)])
+    'Living Room (L)': ('living_room', 'living_room_left', [('office', ''), ('living_room_l', '')]),
+    'Living Room (R)': ('living_room', 'living_room_right', [('unnamed_room', ''), ('living_room_r', '')]),
+    'Bedroom': ('bedroom', 'bedroom_speaker', [('unnamed_room', '_2'), ('bedroom', '')]),
+}
+
+
+def _rebase(o, base, prefixes):
+    if o == base or o.startswith(base + '_'):
+        return None  # already done
+    for pre, suf in prefixes:
+        if (o == pre + suf or o.startswith(pre + '_')) and o.endswith(suf):
+            mid = o[len(pre):len(o) - len(suf)] if suf else o[len(pre):]
+            if suf and mid.endswith(suf):
+                continue
+            return base + mid
+    return False
+
+
+def sel_sonos(c):
+    sonos = {k for k, e in c.entries.items() if e.get('domain') == 'sonos'}
+    areas = {a['area_id'] for a in c.ws.call('config/area_registry/list')}
+    dev_updates, renames, skipped = [], [], []
+    for name, (area, base, prefixes) in SONOS_PLAN.items():
+        ds = [d for d in c.devs.values() if set(d.get('config_entries') or []) & sonos
+              and (d.get('name_by_user') or d.get('name')) == name]
+        if len(ds) != 1:
+            skipped.append((name, f'{len(ds)} Sonos devices with this name'))
+            continue
+        d = ds[0]
+        if area not in areas:
+            skipped.append((name, f'area {area} does not exist'))
+            continue
+        if d.get('area_id') != area:
+            dev_updates.append((d['id'], {'area_id': area}))
+        for e in sorted(c.dev_entities(d['id']), key=lambda x: x['entity_id']):
+            new = _rebase(_obj(e['entity_id']), base, prefixes)
+            if new is False:
+                skipped.append((e['entity_id'], 'unexpected id, left as is'))
+            elif new:
+                renames.append((e['entity_id'], f"{_dom(e['entity_id'])}.{new}"))
+    return dev_updates, renames, skipped
+
+
+def g_sonos(c, guard, apply):
+    dev_updates, renames, skipped = sel_sonos(c)
+    _plan_renames(c, guard, apply, 'sonos', dev_updates, renames, skipped)
+
+
+def _plan_renames(c, guard, apply, group, dev_updates, renames, skipped, hide=()):
+    bad = _check_new(c, renames)
+    p(f'{group}: {len(dev_updates)} device updates, {len(renames)} entity ids to rename')
+    for did, upd in dev_updates:
+        d = c.devs[did]
+        p(f"  device {A.scrub(d.get('name_by_user') or d.get('name'))} ({d.get('model')}): "
+          + ', '.join(f'{k} {A.scrub(d.get(k))!r} -> {v!r}' for k, v in upd.items()))
+    _print_renames(renames, hide)
+    for s in skipped:
+        p('  skip:', *s)
+    for b in bad:
+        p('  problem:', b)
+    p('  references to rewrite:', _count_refs(c, [o for o, _ in renames]) or 'none')
+    if bad:
+        raise SystemExit('refusing: fix the problems first')
+    if apply and (dev_updates or renames):
+        _apply_renames(c, guard, group, dev_updates, renames, hide)
+
+
+# --- 5 Zigbee rooms
+ZB_KEYS = ('power_on_behaviour', 'power_on_level', 'temperature', 'humidity', 'identify', 'firmware', 'battery',
+           'lqi', 'rssi')
+ZB_DIMMER_AUTOS = {'automation.bedroom_lights_remote': ('bedroom', 'Bedroom Dimmer'),
+                   'automation.living_room_remote': ('living_room', 'Living Room Dimmer'),
+                   'automation.balcony_lights': ('balcony', None)}  # keeps his name "Balcony Lights Dimmer"
+ZB_CLIMATE_NAME = re.compile(r'Sonoff Temperature Sensor \((Bedroom|Hallway|Living Room)\)')
+ZB_MODELS = ('RODRET Dimmer', 'SNZB-02P', 'TH01', 'LOM006')
+
+
+def _zb_new(o, room, kind):
+    stem = re.sub(r'_\d+$', '', o)
+    key = next((k for k in ZB_KEYS if stem.endswith('_' + k)), None)
+    if kind == 'dimmer':
+        return f'{room}_dimmer_{key}' if key else None
+    if kind == 'climate':
+        if key in ('temperature', 'humidity'):
+            return f'{room}_{key}'
+        return f'{room}_climate_{key}' if key else None
+    return f'{room}_plug_{key}' if key else f'{room}_plug'
+
+
+def sel_zigbee_rooms(c):
+    zha = {k for k, e in c.entries.items() if e.get('domain') == 'zha'}
+    areas = {a['area_id']: a['name'] for a in c.ws.call('config/area_registry/list')}
+    by_name = {v: k for k, v in areas.items()}
+    zdevs = {d['id']: d for d in c.devs.values() if set(d.get('config_entries') or []) & zha
+             and d.get('model') in ZB_MODELS}
+    plan = {}  # device_id -> (room slug, area_id, new name or None, kind, why)
+    autos = {eid: cfg for eid, _aid, cfg in _automations(c)}
+    for aeid, (area, name) in ZB_DIMMER_AUTOS.items():
+        txt = canon(autos.get(aeid) or {})
+        hits = [i for i, d in zdevs.items() if d.get('model') == 'RODRET Dimmer' and i in txt]
+        if len(hits) == 1 and hits[0] not in plan:
+            plan[hits[0]] = (area, area, name, 'dimmer', f'used by {aeid}')
+    for i, d in zdevs.items():
+        nm = d.get('name_by_user') or d.get('name') or ''
+        m = ZB_CLIMATE_NAME.fullmatch(nm)
+        if d.get('model') == 'SNZB-02P' and m and by_name.get(m.group(1)):
+            a = by_name[m.group(1)]
+            plan[i] = (a, a, None, 'climate', f'name says {m.group(1)}')
+        elif d.get('model') == 'TH01' and d.get('area_id'):
+            a = d['area_id']
+            plan[i] = (a, a, f'Sonoff Temperature Sensor ({areas.get(a, a)})', 'climate', f'already in area {a}')
+        elif d.get('model') == 'LOM006' and d.get('area_id'):
+            a = d['area_id']
+            plan[i] = (a, a, f'{areas.get(a, a)} Plug', 'plug', f'already in area {a}')
+    dev_updates, renames, skipped = [], [], []
+    for i, d in zdevs.items():
+        if i not in plan:
+            skipped.append((f"{A.scrub(d.get('name_by_user') or d.get('name'))} ({d.get('model')}, dev {h(i, 6)})",
+                            'room not clear: not placed'))
+            continue
+        room, area, name, kind, why = plan[i]
+        upd = {}
+        if d.get('area_id') != area:
+            upd['area_id'] = area
+        if name and d.get('name_by_user') != name:
+            upd['name_by_user'] = name
+        if upd:
+            dev_updates.append((i, upd))
+        for e in sorted(c.dev_entities(i), key=lambda x: x['entity_id']):
+            new = _zb_new(_obj(e['entity_id']), room, kind)
+            if not new:
+                skipped.append((e['entity_id'], 'unknown entity kind, left as is'))
+            elif f"{_dom(e['entity_id'])}.{new}" != e['entity_id']:
+                renames.append((e['entity_id'], f"{_dom(e['entity_id'])}.{new}"))
+        p(f"  plan: {A.scrub(d.get('name_by_user') or d.get('name'))} ({d.get('model')}) -> {area} [{why}]")
+    return dev_updates, renames, skipped
+
+
+def g_zigbee_rooms(c, guard, apply):
+    dev_updates, renames, skipped = sel_zigbee_rooms(c)
+    _plan_renames(c, guard, apply, 'zigbee-rooms', dev_updates, renames, skipped)
+
+
+# --- 6 helpers
+BALCONY_GROUP = 'light.balcony_lights'
+GROWLIGHTS = 'switch.growlights'
+DEAD_BOOLEANS = ('party_mode', 'office_light_presence_lock')
+OPTIONS_FLOW = '/api/config/config_entries/options/flow'
+
+
+def sel_helpers(c):
+    out = {'group_entry': None, 'booleans': [], 'grow': None, 'skipped': []}
+    e = c.reg.get(BALCONY_GROUP)
+    if not e:
+        out['skipped'].append((BALCONY_GROUP, 'already gone'))
+    elif e.get('platform') != 'group' or c.entry_domain(e.get('config_entry_id')) != 'group':
+        out['skipped'].append((BALCONY_GROUP, 'not a UI group helper'))
+    elif _attrs(c, BALCONY_GROUP).get('entity_id'):
+        out['skipped'].append((BALCONY_GROUP, 'has members now'))
+    else:
+        out['group_entry'] = e['config_entry_id']
+    stored = {b.get('id') for b in (c.ws.call('input_boolean/list') or [])}
+    refs = _count_refs(c, [f'input_boolean.{b}' for b in DEAD_BOOLEANS] + [BALCONY_GROUP])
+    if refs:
+        out['skipped'].append(('helpers', f'referenced now: {refs}'))
+        out['group_entry'] = None
+    else:
+        for b in DEAD_BOOLEANS:
+            if b in stored:
+                out['booleans'].append(b)
+            else:
+                out['skipped'].append((f'input_boolean.{b}', 'not a stored helper (gone or YAML)'))
+    g = c.reg.get(GROWLIGHTS)
+    if not g or c.entry_domain(g.get('config_entry_id')) != 'group':
+        out['skipped'].append((GROWLIGHTS, 'not a UI group helper'))
+    else:
+        mem = list(_attrs(c, GROWLIGHTS).get('entity_id') or [])
+        dead = [m for m in mem if m not in c.reg and m not in c.states]
+        keep = [m for m in mem if m not in dead]
+        out['grow'] = {'entry': g['config_entry_id'], 'members': mem, 'dead': dead, 'keep': keep}
+    return out
+
+
+def _options_submit(c, guard, entry_id, entities):
+    body = {'handler': entry_id}
+    guard.approve(('rest', 'POST', OPTIONS_FLOW, canon(body)))
+    r = c.rest.request('POST', OPTIONS_FLOW, body) or {}
+    fid = str(r.get('flow_id') or '')
+    if r.get('type') != 'form' or r.get('handler') != entry_id or not re.fullmatch(r'[0-9a-f]{32}', fid):
+        raise A.HAError(f"options flow did not open a form (type {r.get('type')})")
+    data = {}
+    for f in r.get('data_schema') or []:
+        nm = f.get('name')
+        sv = (f.get('description') or {}).get('suggested_value', f.get('default'))
+        if nm and sv is not None:
+            data[nm] = sv
+    if 'entities' not in [f.get('name') for f in r.get('data_schema') or []]:
+        guard.approve(('rest', 'DELETE', f'{OPTIONS_FLOW}/{fid}'))
+        c.rest.request('DELETE', f'{OPTIONS_FLOW}/{fid}')
+        raise A.HAError('options form has no "entities" field: aborted')
+    data['entities'] = list(entities)
+    guard.approve(('rest', 'POST', f'{OPTIONS_FLOW}/{fid}', canon(data)))
+    r2 = c.rest.request('POST', f'{OPTIONS_FLOW}/{fid}', data) or {}
+    if r2.get('type') != 'create_entry':
+        raise A.HAError(f"options flow ended with {r2.get('type')} {A.short_err(r2.get('errors'))}")
+    return sorted(k for k in data if k != 'entities')
+
+
+def g_helpers(c, guard, apply):
+    s = sel_helpers(c)
+    p('helpers:')
+    p('  delete group', BALCONY_GROUP, 'entry' if s['group_entry'] else '(skipped)')
+    for b in s['booleans']:
+        p(f'  delete input_boolean.{b}')
+    gr = s['grow']
+    if gr:
+        p(f"  {GROWLIGHTS}: {len(gr['members'])} members, drop {len(gr['dead'])} missing: "
+          f"{[A.scrub(m) for m in gr['dead']]}; keep {gr['keep']}")
+        if not gr['keep']:
+            p('  ! nothing would be left: NOT changed (report back to the owner)')
+    for x in s['skipped']:
+        p('  skip:', *x)
+    if not apply:
+        return
+    before = {'at': now_iso(), 'balcony_group': {'entity_id': BALCONY_GROUP, 'entry_id': s['group_entry'],
+                                                  'members': []} if s['group_entry'] else None,
+              'input_booleans': [{'id': b, 'name': next((x.get('name') for x in c.ws.call('input_boolean/list') or []
+                                                          if x.get('id') == b), None)} for b in s['booleans']],
+              'growlights': {'entry_id': gr['entry'], 'members': [A.scrub(m) for m in gr['members']],
+                             'dropped': [A.scrub(m) for m in gr['dead']]} if gr else None,
+              'undo': 'recreate by hand (Settings > Helpers) or restore the HA backup'}
+    undo_save('helpers', {'before': before}, section=ROUND3)
+    errors, done = [], []
+    if s['group_entry']:
+        path = '/api/config/config_entries/entry/' + s['group_entry']
+        guard.approve(('rest', 'DELETE', path))
+        try:
+            c.rest.request('DELETE', path)
+            done.append('balcony group deleted')
+        except A.HAError as ex:
+            errors.append(f'balcony group: {ex}')
+    for b in s['booleans']:
+        msg = {'input_boolean_id': b}
+        guard.approve(('input_boolean/delete', canon(msg)))
+        try:
+            c.ws.call('input_boolean/delete', **msg)
+            done.append(f'input_boolean.{b} deleted')
+        except A.HAError as ex:
+            errors.append(f'input_boolean.{b}: {ex}')
+    if gr and gr['dead'] and gr['keep']:
+        try:
+            kept_opts = _options_submit(c, guard, gr['entry'], gr['keep'])
+            done.append(f"growlights: dropped {len(gr['dead'])} missing members (other options kept: {kept_opts})")
+        except A.HAError as ex:
+            errors.append(f'growlights: {ex}')
+
+    def still():
+        c.refresh()
+        bad = [BALCONY_GROUP] if s['group_entry'] and (BALCONY_GROUP in c.reg or s['group_entry'] in c.entries) else []
+        bad += [f'input_boolean.{b}' for b in s['booleans'] if f'input_boolean.{b}' in c.reg]
+        if gr and gr['dead'] and gr['keep']:
+            now = list(_attrs(c, GROWLIGHTS).get('entity_id') or [])
+            if sorted(now) != sorted(gr['keep']):
+                bad.append(f'growlights members {len(now)}')
+        return bad
+    left = _settle(c, still)
+    ok = not left and not errors
+    undo_save('helpers', {'before': before, 'applied': {'done': done, 'errors': errors},
+                          'verify': {'left': left, 'growlights_members_now': list(_attrs(c, GROWLIGHTS).get('entity_id') or []),
+                                     'ok': ok}}, section=ROUND3)
+    for x in done:
+        p('applied:', x)
+    for x in errors:
+        p('  error:', x)
+    p('verify:', 'OK' if ok else f'left {left}', f"| growlights now {list(_attrs(c, GROWLIGHTS).get('entity_id') or [])}")
+
+
+# --- 7 scene
+SCENE_DEL = 'scene.full_light'
+SCENES_FILE = os.path.expanduser('~/reports/ha/scenes-removed-2026-10-16.json')
+
+
+def g_scene(c, guard, apply):
+    sid = str(_attrs(c, SCENE_DEL).get('id') or '')
+    if SCENE_DEL not in c.states or not sid:
+        p(f'scene: {SCENE_DEL} not present (already gone?)')
+        return
+    refs = _count_refs(c, [SCENE_DEL])
+    path = f'/api/config/scene/config/{sid}'
+    cfg = c.rest.request('GET', path) or {}
+    p(f"scene: delete {SCENE_DEL} ({len(cfg.get('entities') or {})} entities in it); references: {refs or 'none'}")
+    if refs:
+        raise SystemExit('refusing: the scene is referenced')
+    if not apply:
+        return
+    d = {}
+    if os.path.exists(SCENES_FILE):
+        with open(SCENES_FILE) as f:
+            d = json.load(f)
+    d[sid] = cfg
+    tmp = SCENES_FILE + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, SCENES_FILE)
+    undo_save('scene', {'before': {'at': now_iso(), 'entity_id': SCENE_DEL, 'config_id': sid,
+                                   'copy': SCENES_FILE + f' [{sid}]',
+                                   'undo': 'POST the saved config to /api/config/scene/config/<id>'}}, section=ROUND3)
+    guard.approve(('rest', 'DELETE', path))
+    err = None
+    try:
+        c.rest.request('DELETE', path)
+    except A.HAError as ex:
+        err = str(ex)
+    left = _settle(c, lambda: [SCENE_DEL] if SCENE_DEL in c.states or SCENE_DEL in c.reg else [])
+    ok = not left and not err
+    undo_save('scene', {'before': {'entity_id': SCENE_DEL, 'config_id': sid, 'copy': SCENES_FILE + f' [{sid}]'},
+                        'applied': {'error': err}, 'verify': {'left': left, 'ok': ok}}, section=ROUND3)
+    p('applied: deleted' if not err else f'error: {err}', '| copy saved' , '| verify:', 'OK' if ok else f'left {left}')
+
+
+# --- 8 duplicate players
+DUPES = {'media_player.living_room_tv_2': ('cast', 'media_player.living_room_tv_cast'),
+         'media_player.home_theater_2': ('heos', 'media_player.home_theater_heos')}
+
+
+def g_dupes(c, guard, apply):
+    renames, skipped, hide = [], [], set()
+    for old, (plat, new) in DUPES.items():
+        e = c.reg.get(old)
+        if not e:
+            if (c.reg.get(new) or {}).get('hidden_by') == 'user':
+                skipped.append((old, 'already done'))
+            elif new in c.reg:
+                renames.append((new, new))
+                hide.add(new)
+            else:
+                skipped.append((old, 'not found'))
+        elif e.get('platform') != plat:
+            skipped.append((old, f"platform {e.get('platform')} is not {plat}"))
+        else:
+            renames.append((old, new))
+            hide.add(new)
+    renames = [(o, n) for o, n in renames if o != n] + [(o, n) for o, n in renames if o == n]
+    _plan_renames(c, guard, apply, 'dupes', [], renames, skipped, hide=hide)
+
+
+# --- 9 HueBLE log level (persistent, no YAML)
+HUE_LOGGER = 'HueBLE'
+
+
+def _hue_log(c):
+    rows = [x for x in (c.ws.call('system_log/list') or []) if isinstance(x, dict) and x.get('name') == HUE_LOGGER]
+    return {'entries': len(rows), 'count': sum(x.get('count') or 0 for x in rows),
+            'last': max((x.get('timestamp') or 0 for x in rows), default=0)}
+
+
+def g_hue_log(c, guard, apply, show_only=False):
+    s = _hue_log(c)
+    last = dt.datetime.fromtimestamp(s['last']).isoformat(timespec='seconds') if s['last'] else None
+    p(f"hue-log: {HUE_LOGGER} warnings in the system log: {s['count']} ({s['entries']} distinct), last {last}")
+    if show_only:
+        return
+    p(f'  set logger {HUE_LOGGER} -> ERROR, persistence permanent (ws logger/log_level; stored in .storage, no YAML)')
+    if not apply:
+        return
+    undo_save('hue-log', {'before': {'at': now_iso(), 'module': HUE_LOGGER, 'level': 'default (WARNING)',
+                                     'system_log': s, 'undo': 'ws logger/log_level {module: HueBLE, level: WARNING, '
+                                                              'persistence: permanent}'}}, section=ROUND3)
+    msg = {'module': HUE_LOGGER, 'level': 'ERROR', 'persistence': 'permanent'}
+    guard.approve(('logger/log_level', canon(msg)))
+    err = None
+    try:
+        c.ws.call('logger/log_level', **msg)
+    except A.HAError as ex:
+        err = str(ex)
+    undo_save('hue-log', {'before': {'module': HUE_LOGGER, 'system_log': s}, 'applied': {'set': msg, 'error': err},
+                          'verify': {'how': 'ha-apply show hue-log a few minutes later: "last" must not move',
+                                     'last_at_apply': s['last']}}, section=ROUND3)
+    p('applied:', 'OK' if not err else f'error {err}', '| verify later with: ha-apply show hue-log')
+
+
+# ----------------------------------------------------------------------------- scene rebuild
+SCENE_REBUILD = 'scene-rebuild'
+SCENE_REBUILD_ABOUT = ('Scene rebuild (owner-approved): scenes written via POST /api/config/scene/config/<id>. '
+                       'Undo per scene: DELETE /api/config/scene/config/<id>, or POST the "before" config back if '
+                       'one existed. Old configs of these ids: scenes-removed-2026-10-16.json.')
+SCENES_NEW = [  # (config id, name, icon, entities): the approved draft, main variants
+    ('1704748847044', 'Movie', 'mdi:movie', {
+        'light.living_room_hanging_lamps': {'state': 'off'},
+        'light.wled_4': {'state': 'off'},
+        'light.wled': {'state': 'off'}}),
+    ('1704831840573', 'Dim Light', 'mdi:desk-lamp', {
+        'light.living_room_hanging_lamps': {'state': 'on', 'brightness': 76},
+        'light.wled_4': {'state': 'on', 'brightness': 61, 'color_mode': 'rgbw', 'rgbw_color': [255, 145, 22, 160],
+                         'effect': 'Solid'},
+        'light.wled': {'state': 'on', 'brightness': 51, 'color_mode': 'rgbw', 'rgbw_color': [255, 155, 61, 0],
+                       'effect': 'Solid'}}),
+    ('1704749350279', 'Ambient', 'mdi:lightbulb-on-70', {
+        'light.living_room_hanging_lamps': {'state': 'on', 'brightness': 51},
+        'light.wled_4': {'state': 'on', 'brightness': 153, 'color_mode': 'rgbw', 'rgbw_color': [0, 90, 255, 0],
+                         'effect': 'Solid'},
+        'light.wled': {'state': 'on', 'brightness': 153, 'color_mode': 'rgbw', 'rgbw_color': [0, 90, 255, 0],
+                       'effect': 'Solid'}}),
+    ('1704749075545', 'Full Light', 'mdi:desk-lamp-on', {
+        'light.bedroom_lamp': {'state': 'on', 'brightness': 254, 'color_mode': 'color_temp',
+                               'color_temp_kelvin': 3500},
+        'light.living_room_hanging_lamps': {'state': 'on', 'brightness': 255},
+        'light.wled_4': {'state': 'on', 'brightness': 255, 'color_mode': 'rgbw', 'rgbw_color': [62, 29, 0, 255],
+                         'effect': 'Solid'},
+        'light.wled': {'state': 'on', 'brightness': 255, 'color_mode': 'rgbw', 'rgbw_color': [62, 29, 0, 255],
+                       'effect': 'Solid'}}),
+]
+
+
+def _scene_eid(name):
+    return 'scene.' + re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+
+
+def _scene_found(c, sid):
+    """entity ids of scenes whose config id is sid (registry unique_id or state attribute id)"""
+    ids = {e['entity_id'] for e in c.reg.values()
+           if _dom(e['entity_id']) == 'scene' and str(e.get('unique_id')) == sid}
+    ids |= {eid for eid in c.states if _dom(eid) == 'scene' and str(_attrs(c, eid).get('id') or '') == sid}
+    return sorted(ids)
+
+
+def _scene_cfg(c, sid):
+    try:
+        return c.rest.request('GET', f'/api/config/scene/config/{sid}')
+    except A.HAError as ex:
+        if 'HTTP 404' in str(ex):
+            return None
+        raise
+
+
+def g_scene_create(c, guard, apply):
+    plan, before = [], {}
+    for sid, name, icon, ents in SCENES_NEW:
+        want = _scene_eid(name)
+        body = {'name': name, 'icon': icon, 'entities': ents}
+        cfg = _scene_cfg(c, sid)
+        found = _scene_found(c, sid)
+        if (want in c.reg or want in c.states) and want not in found:
+            raise SystemExit(f'refusing: {want} already exists for another scene')
+        missing = [e for e in ents if e not in c.reg and e not in c.states]
+        offline = [e for e in ents if c.states.get(e) in ('unavailable', None) and e not in missing]
+        same = cfg is not None and all(cfg.get(k) == v for k, v in body.items())
+        p(f"scene-create: {want} ({name}, {len(ents)} lights) "
+          + ('already there' if same else 'replace existing config' if cfg else 'create')
+          + (f'; now {found}' if found and found != [want] else '')
+          + (f'; offline: {offline}' if offline else '') + (f'; MISSING: {missing}' if missing else ''))
+        if not same:
+            plan.append((sid, want, body))
+            before[sid] = {'entity_id': want, 'config': cfg, 'entities_found': found}
+    if not plan:
+        p('scene-create: nothing to do')
+        return
+    p('  then: scene.reload + read-back (no scene is activated)')
+    if not apply:
+        return
+    undo_save('scene-create', {'before': {'at': now_iso(), 'scenes': before,
+                                          'undo': 'DELETE /api/config/scene/config/<id> (or POST "config" back)'}},
+              section=SCENE_REBUILD)
+    errors = []
+    for sid, want, body in plan:
+        path = f'/api/config/scene/config/{sid}'
+        guard.approve(('rest', 'POST', path, canon(body)))
+        try:
+            c.rest.request('POST', path, body)
+        except A.HAError as ex:
+            errors.append(f'{want}: {ex}')
+    reload_msg = {'domain': 'scene', 'service': 'reload', 'service_data': {}}
+    guard.approve(target_key('call_service', reload_msg))
+    try:
+        c.ws.call('call_service', **reload_msg)
+    except A.HAError as ex:
+        errors.append(f'reload: {ex}')
+    exp = {sid: _scene_eid(name) for sid, name, _, _ in SCENES_NEW}
+    left = _settle(c, lambda: [w for s, w in exp.items() if _scene_found(c, s) != [w] or w not in c.states])
+    got = {exp[s]: _scene_found(c, s) for s in exp}
+    cfg_ok = {exp[s]: (lambda cf: cf is not None and all(cf.get(k) == v for k, v in
+                                                          {'name': n, 'icon': i, 'entities': e}.items()))(_scene_cfg(c, s))
+              for s, n, i, e in SCENES_NEW}
+    ok = not left and not errors and all(cfg_ok.values())
+    undo_save('scene-create', {'before': {'scenes': before}, 'applied': {'written': [w for _, w, _ in plan],
+                                                                         'errors': errors},
+                               'verify': {'entities': got, 'config_match': cfg_ok, 'left': left, 'ok': ok}},
+              section=SCENE_REBUILD)
+    p(f'applied: {len(plan) - len([e for e in errors if not e.startswith("reload")])} scenes written; errors {errors or "none"}')
+    for w, ids in got.items():
+        p(f"  read-back {w}: {', '.join(ids) or 'NOT FOUND'}"
+          + ('' if ids == [w] else '  <- differs') + ('' if cfg_ok[w] else '  config differs'))
+    p('verify:', 'OK' if ok else f'left {left}')
+
+
+def show_backups(c):
+    info = c.ws.call('backup/info') or {}
+    for b in sorted(info.get('backups', []), key=lambda b: b.get('date') or ''):
+        ag = {k: {'size_mb': round((v.get('size') or 0) / 1e6, 1), 'protected': v.get('protected')}
+              for k, v in (b.get('agents') or {}).items()}
+        p(b.get('date'), b.get('backup_id'), A.scrub(b.get('name')), 'auto' if b.get('with_automatic_settings') else 'manual', ag)
+    for k in ('last_attempted_automatic_backup', 'last_completed_automatic_backup', 'next_automatic_backup',
+              'state'):
+        p(k, info.get(k))
+
+
+GROUPS = {'orphans': g_orphans, 'phones': g_phones, 'zigbee': g_zigbee,
+          'plants': g_plants, 'wiz': g_wiz, 'ibeacon': g_ibeacon, 'old-phones': g_old_phones,
+          'vacuum': g_vacuum, 'hacs': g_hacs, 'addons': g_addons, 'sonos': g_sonos, 'zigbee-rooms': g_zigbee_rooms,
+          'helpers': g_helpers, 'scene': g_scene, 'dupes': g_dupes, 'hue-log': g_hue_log,
+          'scene-create': g_scene_create}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog='ha-apply', description=__doc__.split('\n\n')[0])
+    ap.add_argument('what', choices=list(GROUPS) + ['hallway', 'backup-config', 'show'])
+    ap.add_argument('item', nargs='?', choices=['backups', 'backup-config', 'hallway', 'hue-log'])
+    ap.add_argument('--apply', action='store_true', help='make the change (default: dry run, reads only)')
+    ap.add_argument('--replace', help='hallway: the light that replaces light.hallway_lights')
+    ap.add_argument('--url', default=A.DEFAULT_URL)
+    ap.add_argument('--token-file', default=A.DEFAULT_TOKEN_FILE)
+    a = ap.parse_args(argv)
+    with open(a.token_file) as f:
+        token = f.read().strip()
+    guard = Guard(writes=a.apply and a.what != 'show')
+    ws = WS(a.url, token, guard)
+    try:
+        c = Ctx(ws, Rest(a.url, token, guard))
+        if a.what == 'show':
+            if a.item == 'backups':
+                show_backups(c)
+            elif a.item == 'backup-config':
+                g_backup_config(c, guard, False, show_only=True)
+            elif a.item == 'hallway':
+                g_hallway(c, guard, False, show_only=True)
+            elif a.item == 'hue-log':
+                g_hue_log(c, guard, False, show_only=True)
+            else:
+                ap.error('show needs: backups | backup-config | hallway | hue-log')
+        elif a.what == 'hallway':
+            g_hallway(c, guard, a.apply, replace=a.replace)
+        elif a.what == 'backup-config':
+            g_backup_config(c, guard, a.apply)
+        else:
+            GROUPS[a.what](c, guard, a.apply)
+        if not a.apply and a.what != 'show':
+            p('(dry run: nothing written; add --apply)')
+    except (A.HAError, NotAllowed) as ex:
+        p('ERROR:', ex)
+        return 2
+    finally:
+        ws.close()
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

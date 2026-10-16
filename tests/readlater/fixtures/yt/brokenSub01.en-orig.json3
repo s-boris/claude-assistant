@@ -1,0 +1,1 @@
+{"events": [{"tStartMs": 1000, "dDurationMs": 2000, "segs": [{"utf8": "auto caption fallback works"}]}, {"tStartMs": 5000, "dDurationMs": 2000, "segs": [{"utf8": "after the manual track was missing"}]}]}

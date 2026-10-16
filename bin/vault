@@ -1,0 +1,3248 @@
+#!/usr/bin/python3 -I
+"""vault: client for the owner's privacy vault (container claude-vault on Unraid, http://claude-vault:8300).
+
+The vault holds the raw private data and its credentials (Telegram archive + session, paperless/Firefly tokens, the
+local LLM); this box only gets policy-filtered results (regex net -> local LLM anonymizer -> regex net).
+Raw text needs the owner's OK: the vault's own bot texts him the request with ✅ Allow once / ❌ Deny buttons (I can
+never approve; fallback while that bot can't poll: a 6-digit code in the message). New incoming Telegram messages
+and Gmail mails are triaged + anonymized in the vault into an event feed (`vault events`; ~/bin/vault-events turns it
+into inbox notes). Gmail is READ-ONLY in the vault (IMAP EXAMINE + BODY.PEEK only: never marks, moves, deletes, sends).
+
+  vault status [--json]                        state of the vault, LLM, Telegram login/sync, sources (no data)
+  vault tg COMMAND ...                          tgread through the vault (same options; ~/bin/tgread wraps this):
+        search QUERY | recent | unread-summary-data | summarize | window (counts per chat/day, no text) | chats |
+        status | exclude | purge | sync |
+        wipe | allowlist | set-credentials (stdin) | login-qr [--out PNG] [--timeout S] [--password-stdin] |
+        login-status | login-cancel | 2fa (password on stdin) | download --chat X --msg N --reason R |
+        alias set CHAT NAME [--tag T] | alias rm NAME | alias list | find-chat QUERY [--since 365d] [-n 10] |
+        who NAME | media --chat X (= vault media list tg X)      chat directory: metadata only, no LLM
+  vault paperless get ID [--content --reason R]   a card (metadata, amount, due date), never content; --content asks
+        the owner (✅) for the anonymized text
+  vault paperless fields ID [--fields a,b] [--reason R]   tier 1 free; tier-2 fields (IBAN, reference, numbers,
+        addresses, dates) come back null + _withheld unless --reason asks the owner (✅)
+  vault paperless suggest ID   type/correspondent/tags from the existing names, read inside the vault
+  vault paperless rule test tag|type|correspondent --regex R|--any W|--all W|--literal T|--fuzzy T [--case-sensitive]
+        [--name N] [--json]   which documents a rule would hit (ids + current values only)
+  vault paperless search|recent|get|meta|fields|upload|task|download ...   (~/bin/paperless delegates here when
+        VAULT_MODE is on; get = anonymized content; fields = whitelisted raw admin fields as JSON)
+  vault paperless set ID [--title T] [--created D] [--type T] [--correspondent C] [--tag +ADD|-REMOVE] [--create]
+  vault paperless rule set tag|type|correspondent NAME --regex R|--any W|--all W|--literal T|--fuzzy T|--auto|--none
+        [--case-sensitive] [--inbox|--no-inbox] [--create]   |   vault paperless rules [KIND]   (metadata writes only)
+  vault firefly status | summary START END | merchants START END [--limit N] | sync-status
+  vault firefly check | rules | rules-set [--request-id ID --code C] < rules.json | rules-replace --reason TEXT
+                                 the sync's private rules (write-only: counts + sha256 back) and a numbers-only dry run
+  vault ha inventory [--json]        the owner's phone entities in Home Assistant, metadata only (kinds, no values)
+  vault ha now [--json]              his current coarse flags from the vault's HA feed: zone name or away + distance
+        band (+ town), drive, activity, Bluetooth categories, Wi-Fi class, sleep, alarm, battery; + their age
+  vault people [--active 90d] [--relation R|set|unset] [-n 20] [--json]   person cards, fields only:
+        his Telegram DM contacts with >= 10 messages in 12 months, at most 20 shown: first name (or his chat alias),
+        key, relation (only he sets it), last contact dates, 30-day counts; never message text
+  vault people show NAME|KEY [--json] | relation NAME [VALUE] | forget NAME | unforget NAME|KEY | rebuild
+        relation NAME: the vault bot asks him (buttons, <= 20 a day); relation NAME VALUE: only when he told me (the
+        vault bot confirms it to him with Undo); both need VAULT_PEOPLE_ASK=1. forget/unforget only on his request
+        With VAULT_PEOPLE_ASKS=1 cards add open asks (dir from_them|from_owner, wants, urgency, due, since, status
+        open|replied, refs; expire after 21 days or due + 7) and top topics of 90 days (enums); `--asks` lists only
+        cards with open asks
+  vault people refresh asks [--sample N] | topics     feed asks + statuses now (numbers); --sample N (<= 30): a dry
+        run of the nightly triage of his own DM messages over his newest ones (counts only, nothing stored)
+  vault people calibrate [--sample N] [--dry] [--force]   topic calibration in the vault (async job; Gemma labels
+        chunks inside, only accuracy numbers come back); runs by itself at night; by day only --dry with --sample <= 40
+  vault gmail status [--json] | search QUERY [-n N] [--folder F] [--account L|all] [--json]
+        | get REF [--chars N] [--account L] [--json]
+        | to-paperless REF [N] [--account L] [--title T] [--tag T] [--correspondent C] [--type T] [--created D]
+  vault gmail import scan [--account L ...] [--since YYYY-MM-DD] [--max N] [--no-download] [--no-llm] [--resume ID]
+        | import status [ID] [--json] | import --plan ID --categories a,b [--limit N] [--office] [--likely]
+        [--pause S] [--dry-run] | import cancel [ID] | import drop ID   mail backfill into paperless, all in the
+        vault: the plan rows stay there; I get counts, categories, years, sender domains / first names
+        [--create] | config [--account L] [--folders A,B] [--owner-name NAME]
+        Several accounts: each has a label (main = the first; `vault gmail status` lists them). REF = main:1234 or
+        work:1234@Folder (from events/search: it carries the account; a bare 1234 only while there is one account).
+        search: all accounts unless --account; N = the attachment number (default 1); Gmail's search syntax
+        (from:x has:attachment newer_than:7d ...)
+  vault llm-run -- [llm-local options] < text  llm-local in the vault on my own text (llm-local backend "vault")
+  vault media list tg CHAT | gmail REF | paperless ID [--type pdf|photo|voice|video|audio|document] [--since 30d]
+        [--grep WORD] [-n N] [--json]      files as metadata only (names privacy-filtered), numbered, with keys
+  vault media request KEY... | --pick 1,3  --reason R [--keep 2h] [--no-wait]   up to 5 files; the owner gets
+        ✅ Allow once / 📋 Facts only (PDF/.ics) / ❌ Deny; files land in ~/.cache/vault/media/<rid>/ (0700/0600) and
+        are deleted after --keep (2 h by default and at most) by `vault media gc` (cron */5 + every call)
+  vault media release RID [--wait N] | facts KEY|N [--kind travel|event|booking|ics|generic] (no approval: fields
+        from the anonymized text; never PNR, ticket numbers, prices) | gc [--quiet] | status
+  vault raw request --source tg|tg-file|paperless|paperless-file|firefly|gmail|test --reason R [--query JSON] [...]
+        (gmail: --uid REF [--account L] [--attachment N | --eml]: the mail as text, one attachment, or the .eml)
+  vault raw release REQUEST_ID [CODE] [--out PATH] [--wait S | --no-wait]   (CODE only for a fallback-code request;
+        without it: waits up to --wait s, default 100, for his tap, then exit 10 = still pending)  |  vault raw pending
+  vault facts tg CHAT [--since 60d] [-n 400] | gmail REF [--account L] [--chars N]  [--brief]   events, to-dos,
+        places, decisions, open questions as JSON: read from the anonymized (not paraphrased) text in the
+        vault, every value found in it, dates worked out from the message times; long windows: vault --async facts ...
+  vault ask tg (--chat C | --search Q) [--since 30d] [--kind K] ["question"] [--json]   an ANSWER, not text
+        kinds yesno, when, who, deadline, actionable, requests, count, short, interests, digest; values
+        checked in the vault. `vault ask gmail REF [--kind K] ["question"]` (default: the mail card). = `tgread ask`.
+        --retrieval hybrid|keyword: hybrid = keyword hits + the question's semantic neighbours from the
+        vault's index, fused into conversation chunks (one answer part; --chars 500-4500, default 2000); a long --chat
+        window reads only the best-matching chunks for question kinds. Default: VAULT_INDEX (keyword when off); falls
+        back to keyword per call when the index can't serve (answer `retrieval`: mode, counts, fallback reason)
+  --text --reason "why" on tg search|recent|unread-summary-data|summarize, gmail search|get, find: the TEXT, only
+        after the owner's ✅ in the vault bot (exit 10 + how to pick it up); --no-text: the default (hits,
+        digest, cards; TEXT_DEFAULT = False in the vault).
+  vault find "QUERY" [--since 30d] [--sources tg,gmail,paperless] [-n 15] [--json]   one ranked list across Telegram,
+        Gmail and paperless with Swiss German / German / English variants (Hochzeit = Hochziit =
+        wedding, Freitag = Fritig, JGA = Junggesellenabschied, Geburtstag = Geburi), ue = ü, word starts; one
+        anonymize call; paperless as metadata only.  `vault tg search QUERY --expand` = the same variants in Telegram
+  vault plans [--days 14] [--json]       dated facts of the event feed (calendar suggestions):
+        "Sat 17.10 16:00 Concert, Town Hall · Choir"; then the calendar rule (add obvious ones, ask if unsure)
+  vault events [--since CURSOR|latest] [--max N] [--source telegram|gmail] [--json]    (alias: vault tg events)
+  vault events rules | mute|priority|normal [--source S] --chat KEY|--sender KEY   (per source + chat/sender;
+        gmail: --chat DOMAIN (subdomains too) | --sender ADDRESS or its pseudonym)
+  vault audit [--days 7] [--json]  |  vault alerts [--to-inbox]  |  vault metrics [--days 1] [--json]  (health numbers)
+  vault --async tg search|recent|unread-summary-data|summarize ... | gmail search|get ... | paperless get ... |
+        media facts ... | llm-run ...      (--async anywhere before `--`): runs it as a job in the vault, prints its
+        id at once (tg summarize then goes per chat/day + one merge, with progress and part results)
+  vault job wait ID [--max 230] [--partial] [--json]   the job's answer, printed like the command would (its exit
+        code); still running after --max s: exit 12 (progress on stderr; --partial: the parts done so far)
+  vault job list [--json]  |  vault job cancel ID       (results are kept 30 min; a vault restart drops every job)
+  vault secret list | set NAME [--request-id ID [--code CODE]] (JSON on stdin) | rotate NAME --reason R
+  vault index status [--full] [--json]   embedding server (VAULT_EMBED, idle CPU priority), sqlite-vec,
+        the index (chunks, chats, size, lag, build progress) and the last bake-off (recall, MRR: numbers only)
+  vault index rebuild [--reconcile]   queue a full shadow rebuild (or a reconcile) for the vault's index thread
+  vault index eval [--sample 2000] [--queries 400] [--models a,b] [--seed N]   the bake-off inside the vault, as an
+        async job at background priority (~1-2 h; Gemma writes the questions); then `vault index status --full`
+  vault deploy request [COMMIT] [--wait S]   a Telegram-approved vault deploy: the owner's server (deploy runner)
+        reviews COMMIT (default HEAD of ~/opt/claude-vault; it must be on GitHub main: vault admin deploy pushes), the
+        vault bot sends him a card with the server's facts and ✅ Deploy / ❌ Cancel, the server deploys on ✅. Changes
+        to docker-compose.yml (container privileges) and first deploys need his User Scripts button.
+        Exit 0 deployed, 10 still under way (reviewing / his decision / deploying), 1 not deployed
+  vault deploy status [ID] [--wait S] [--json]   the runner (alive, deployed commit) and the deploy requests
+  vault admin deploy | logs [-n N] | ps   deploy: push the source to GitHub (vault-git-sync) and print "ready for your
+        deploy: <commit>", the commits since his last deploy and flagged files; logs/ps: the read-only verbs
+        vault-logs/vault-ps. The owner deploys (vault deploy request, or his User Scripts button).
+  vault admin init | test | restart | down | test-instance | env-add   the owner's, refused here: the API token's
+        hash (vault-deploy token-hash), the image tests (every deploy runs them), restart/stop (the Docker tab), the
+        server's .env values (by hand). They run only where `unraid-ssh mode` reports root (no lockdown).
+Global: --instance test (the ephemeral test vault: http://claude-vault-test:8300, ~/.secrets/vault-test-token).
+Config: ~/.config/vault/url, ~/.secrets/vault-token (0600), ~/.config/vault/mode (on = paperless via the vault).
+Exit codes: 0 ok, 1 error, 2 usage, 3 vault/LLM/source unavailable or not configured, 10 waiting for the owner
+(his tap or code), 12 job still running (vault job wait), 75 busy/try later, 77 auth; tg and llm-run pass through
+tgread's and llm-local's own exit codes.
+"""
+import argparse
+import ast
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+sys.dont_write_bytecode = True
+HOME = os.path.expanduser('~')
+CONF = os.path.join(HOME, '.config', 'vault')
+SRC = os.path.join(HOME, 'opt', 'claude-vault')
+STAGE = os.path.join(HOME, '.cache', 'vault', 'stage')
+REMOTE = '/mnt/user/appdata/claude-vault'
+SSH = os.environ.get('VAULT_SSH_HOST', 'unraid')
+VOL = 'claude-vault_data'
+# Local LLM weights (Gemma-4-26B-A4B, 14 GB): not in the vault's docker volume (docker.img is 50 GB, the
+# owner's Unraid warns at 70%) but on the data pool, bind-mounted read-only at /models (docker-compose.yml). `deploy`
+# seeds the dir: a reflink copy (same btrfs pool: instant, no extra space) of this container's ~/opt/llm-models/<file>,
+# else a download; sha256-checked before it goes live. Names, hashes and URLs come from app/vaultd.py (weight_pins).
+WEIGHTS_HOST = '/mnt/data/appdata/claude-vault-models'
+WEIGHTS_SRC = '/mnt/data/appdata/claude-bot/home/opt/llm-models'     # = ~/opt/llm-models here
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+LONG = 4 * 3600
+INSTANCE = {'prod': ('http://claude-vault:8300', os.path.join(HOME, '.secrets', 'vault-token')),
+            'test': ('http://claude-vault-test:8300', os.path.join(HOME, '.secrets', 'vault-test-token'))}
+EXIT_CODE_PENDING = 10
+EXIT_CODE_RUNNING = 12
+JOB_DIR = os.path.join(HOME, '.cache', 'vault', 'jobs')
+JOB_ROUTES = {('POST', '/tg/search'): 'tg.search', ('POST', '/tg/recent'): 'tg.recent',      # vault --async (#4)
+              ('POST', '/tg/unread-summary-data'): 'tg.unread-summary-data', ('POST', '/tg/summarize'): 'tg.summarize',
+              ('POST', '/gmail/search'): 'gmail.search', ('POST', '/gmail/get'): 'gmail.get',
+              ('POST', '/paperless/get'): 'paperless.get', ('POST', '/media/extract'): 'media.extract',
+              ('POST', '/paperless/suggest'): 'paperless.suggest',
+              ('POST', '/llm/run'): 'llm.run', ('POST', '/tg/facts'): 'tg.facts', ('POST', '/gmail/facts'): 'gmail.facts',
+              ('POST', '/find'): 'find', ('POST', '/answer'): 'answer', ('POST', '/tg/digest'): 'tg.digest'}
+HTTP_EXIT = {400: 2, 401: 77, 404: 2, 409: 1, 410: 1, 413: 2, 429: 75, 502: 3, 503: 3}
+
+
+def http_exit(status, code=None):
+    return 75 if code == 'llm_busy' else HTTP_EXIT.get(status, 1)
+
+
+def die(msg, code=1):
+    print(f'vault: {msg}', file=sys.stderr)
+    sys.exit(code)
+
+
+def read_file(p):
+    try:
+        with open(p, encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+class Client:
+    async_mode = False                                 # vault --async: job-capable calls become POST /jobs
+    async_argv = None
+
+    def __init__(self, instance='prod'):
+        url, tok = INSTANCE[instance]
+        if instance == 'prod':
+            url = os.environ.get('VAULT_URL') or read_file(os.path.join(CONF, 'url')) or url
+            tok = os.environ.get('VAULT_TOKEN_FILE') or tok
+        self.url, self.token_file = url.rstrip('/'), tok
+
+    def token(self):
+        try:
+            st = os.stat(self.token_file)
+        except FileNotFoundError:
+            die(f'no API token at {self.token_file} (run: vault admin init)', 77)
+        if st.st_mode & 0o077:
+            os.chmod(self.token_file, 0o600)
+        return read_file(self.token_file)
+
+    def queue_watch(self, done):
+        """Long calls: after 10 s, one stderr line whenever the LLM queue picture changes, e.g.
+        "vault: LLM busy with tgread summarize for 2m10s (ETA ~1m), 1 queued". Kinds and times only."""
+        last = None
+        if done.wait(10):
+            return
+        while True:
+            try:
+                req = urllib.request.Request(self.url + '/status', headers={'Authorization': f'Bearer {self.token()}'})
+                with OPENER.open(req, timeout=10) as r:
+                    q = (json.loads(r.read() or b'{}').get('llm') or {}).get('queue') or {}
+            except (OSError, ValueError):
+                q = {}
+            run, waiting = q.get('running'), q.get('queue') or []
+            if run:
+                fm = lambda s: f'{s // 60}m{s % 60:02d}s' if s >= 60 else f'{s}s'      # noqa: E731
+                eta = f", ETA ~{fm(run['eta_s'])}" if run.get('eta_s') is not None else ''
+                line = (f"vault: LLM busy with {run.get('what')} for {fm(int(run.get('elapsed_s') or 0))}{eta}"
+                        + (f", {len(waiting)} queued" if waiting else ''))
+                if line.split(' for ')[0] + str(len(waiting)) != last:
+                    print(line, file=sys.stderr, flush=True)
+                    last = line.split(' for ')[0] + str(len(waiting))
+            if done.wait(15):
+                return
+
+    def submit_job(self, op, body):
+        """vault --async: the call as a job (POST /jobs); prints its id (stdout) and how to wait (stderr); exit 0."""
+        self.async_mode = False
+        j = self.call('POST', '/jobs', {'op': op, 'params': body or {}}, timeout=60)
+        if (op.split('.')[0] in ('gmail', 'paperless', 'media') or op in ('tg.facts', 'find')) \
+                and self.async_argv:                   # `job wait` re-runs its printer
+            try:
+                write_private(os.path.join(JOB_DIR, j['id'] + '.json'),
+                              json.dumps({'id': j['id'], 'op': op, 'argv': self.async_argv, 'at': time.time()}))
+            except OSError:
+                pass
+        eta = f", ETA ~{fmt_secs(j['eta_s'])}" if j.get('eta_s') is not None else ''
+        pos = f"position {j['position']}" if j.get('position') else j.get('state', 'queued')
+        print(j['id'])
+        print(f"vault: job {j['id']} {'joined (same request already running)' if j.get('coalesced') else 'started'}"
+              f" ({pos}{eta}). Wait: vault job wait {j['id']} [--max 230]  (exit 12 = still running)",
+              file=sys.stderr)
+        sys.exit(0)
+
+    def call(self, method, path, body=None, timeout=60, ok_codes=(), raise_timeout=False):
+        """raise_timeout: a socket timeout raises TimeoutError (release polls end with exit 10, not exit 3)."""
+        if self.async_mode:
+            op = JOB_ROUTES.get((method, path))
+            if op is None:
+                die(f'--async is not available here ({method} {path}); it works for tg search|recent|'
+                    f'unread-summary-data|summarize, gmail search|get, paperless get, media facts, facts, find and '
+                    f'llm-run', 2)
+            self.submit_job(op, body)
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.url + path, data=data, method=method,
+                                     headers={'Authorization': f'Bearer {self.token()}',
+                                              'Content-Type': 'application/json'})
+        done = threading.Event()
+        if timeout >= 120 and os.environ.get('VAULT_QUIET') != '1':
+            threading.Thread(target=self.queue_watch, args=(done,), daemon=True).start()
+        try:
+            with OPENER.open(req, timeout=timeout) as r:
+                return json.loads(r.read() or b'{}')
+        except urllib.error.HTTPError as e:
+            try:
+                d = json.loads(e.read() or b'{}')
+            except ValueError:
+                d = {}
+            if e.code in ok_codes:
+                return d
+            die(d.get('error') or f'HTTP {e.code}', http_exit(e.code, d.get('code')))
+        except (urllib.error.URLError, OSError) as e:
+            reason = getattr(e, 'reason', e)
+            if raise_timeout and isinstance(reason, TimeoutError):
+                raise TimeoutError(str(reason)) from None
+            die(f'cannot reach the vault at {self.url} ({reason}). Check: vault admin ps', 3)
+        finally:
+            done.set()
+
+
+def release_poll(c, route, body, wait=100, no_wait=False, slack=5):
+    """Poll /raw/release or /media/release until released or `wait` s are over (a release once hung past
+    its 100 s and an outer 15 s timeout killed it). Each call long-polls at most the time that is left (<= 25 s)
+    and its HTTP timeout is that + `slack` s, so the command ends within ~5 s of --wait even if the vault is slow
+    (media: slack 1800, its Facts-only answer is made after the release, by the local LLM).
+    -> the released answer, or (None, last pending answer or {}) when time is up."""
+    deadline = time.monotonic() + (0 if no_wait else min(max(wait, 0), 3600))
+    w, told, r = 0, None, {}
+    while True:
+        try:
+            r = c.call('POST', route, dict(body, wait=w), timeout=w + slack, raise_timeout=True)
+        except TimeoutError:
+            return None, dict(r, status='pending', vault_slow=True)
+        if r.get('status') != 'pending':
+            return r, None
+        left = deadline - time.monotonic()
+        if left < 0.5:
+            return None, r
+        state = ('approved; the vault is still preparing the text' if r.get('approved') else
+                 "waiting for his tap on ✅ Allow once / ❌ Deny" if r.get('approval') == 'buttons' else
+                 'waiting for his console approval (or the CODE from his message)')
+        if r.get('preparing') and not r.get('approved'):
+            state += ' (the text is still being prepared)'
+        if state != told:
+            print(f'{state} ... (up to {int(left)} s more; --wait S)', file=sys.stderr)
+            told = state
+        w = max(1, min(25, int(left)))
+
+
+def pending_line(kind, rid, r, again):
+    """The stderr line for exit 10: pending / preparing / approved-preparing / the vault was slow."""
+    exp = (r.get('expires_at') or '?')[11:16]
+    if r.get('vault_slow'):
+        why = 'the vault did not answer in time'
+    elif r.get('approved'):
+        why = 'approved; the vault is still preparing the text'
+    elif r.get('preparing'):
+        why = f"the owner hasn't decided yet; the text is still being prepared (expires {exp})"
+    else:
+        why = f"the owner hasn't decided yet (expires {exp})"
+    return f'{kind} {rid}: {why}; ask again: {again}'
+
+
+def fmt_secs(s):
+    s = int(s or 0)
+    return f'{s // 60}m{s % 60:02d}s' if s >= 60 else f'{s}s'
+
+
+class ReplayClient(Client):
+    """`vault job wait`: the finished job's answer fed to the command that submitted it (same output, same exit code);
+    any other call goes to the vault as usual."""
+
+    def __init__(self, base, route, job):
+        self.__dict__.update(base.__dict__)
+        self.route, self.job, self.async_mode = route, job, False
+
+    def call(self, method, path, body=None, timeout=60, ok_codes=()):
+        if (method, path) != self.route:
+            return super().call(method, path, body, timeout, ok_codes)
+        j = self.job
+        if j.get('state') == 'done':
+            return j.get('result') or {}
+        err = j.get('error') or {}
+        if j.get('status') in ok_codes:
+            return err
+        die(err.get('error') or f"job {j.get('state')}", http_exit(j.get('status'), err.get('code')))
+
+
+def job_line(j):
+    p = j.get('progress') or {}
+    bits = [j.get('state', '?')]
+    if p.get('total'):
+        bits.append(f"{p.get('done', 0)}/{p['total']} parts" + (f" ({p['step']})" if p.get('step') else ''))
+    elif p.get('step'):
+        bits.append(p['step'])
+    bits.append(fmt_secs(j.get('elapsed_s')))
+    if j.get('position'):
+        bits.append(f"LLM queue position {j['position']}")
+    if j.get('eta_s') is not None and j.get('state') in ('queued', 'running'):
+        bits.append(f"ETA ~{fmt_secs(j['eta_s'])}")
+    return ', '.join(bits)
+
+
+def print_partial(j):
+    for x in j.get('partial') or []:
+        print(f"## Part {x.get('part')}/{x.get('of')} ({x.get('label')}, {x.get('msgs')} message(s))\n{x.get('text', '')}\n")
+
+
+def cmd_job(c, argv):
+    """Async jobs: wait for one (exit 12 while it runs), list, cancel."""
+    p = argparse.ArgumentParser(prog='vault job', description='async jobs in the vault (vault --async ...)')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    w = sp.add_parser('wait', help="the job's answer, printed like its command; exit 12 = still running")
+    w.add_argument('id')
+    w.add_argument('--max', type=float, default=230, help='give up after this many seconds (default 230)')
+    w.add_argument('--partial', action='store_true', help='still running: print the parts done so far')
+    w.add_argument('--json', action='store_true', help='the job as JSON (state, progress, partial, result)')
+    li = sp.add_parser('list')
+    li.add_argument('--json', action='store_true')
+    ca = sp.add_parser('cancel')
+    ca.add_argument('id')
+    a = p.parse_args(argv)
+    if getattr(a, 'id', None) is not None and not re.fullmatch(r'[0-9a-f]{16}', a.id):
+        die('a job id is 16 hex characters (vault job list)', 2)
+    if a.cmd == 'list':
+        js = c.call('GET', '/jobs', timeout=60)['jobs']
+        if a.json:
+            print(json.dumps(js, indent=1, ensure_ascii=False))
+        elif not js:
+            print('no jobs (results are kept 30 min; a vault restart drops every job)')
+        for j in ([] if a.json else js):
+            print(f"{j['id']}  {j['op']:<22} {job_line(j)}" + (f", {j['bytes']} bytes" if j.get('bytes') else ''))
+        return 0
+    if a.cmd == 'cancel':
+        j = c.call('POST', f'/jobs/{a.id}/cancel', {}, timeout=60)
+        print(f"job {j['id']}: {j['state']}" + (' (stops at its next LLM step)' if j['state'] == 'running' else ''))
+        return 0
+    deadline = time.monotonic() + max(0.0, a.max)
+    while True:
+        left = deadline - time.monotonic()
+        wait = int(max(0, min(25, left)))
+        j = c.call('GET', f'/jobs/{a.id}?wait={wait}', timeout=wait + 60, ok_codes=(404,))
+        if j.get('code') == 'no_such_job':
+            die(j.get('error') or 'no such job', 1)
+        if j.get('state') not in ('queued', 'running'):
+            break
+        if left <= 0:
+            if a.json:
+                print(json.dumps(j, indent=1, ensure_ascii=False))
+            elif a.partial:
+                print_partial(j)
+            print(f"vault: job {a.id} still running ({job_line(j)}). Wait again: vault job wait {a.id} [--max 230]",
+                  file=sys.stderr)
+            sys.exit(EXIT_CODE_RUNNING)
+    if a.json:
+        print(json.dumps(j, indent=1, ensure_ascii=False))
+        return 0 if j['state'] == 'done' else 1
+    rec_path = os.path.join(JOB_DIR, a.id + '.json')
+    try:
+        with open(rec_path, encoding='utf-8') as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        rec = None
+    if j['state'] != 'done':
+        if a.partial:
+            print_partial(j)
+        err = j.get('error') or {}
+        die(f"job {a.id} {j['state']}: {err.get('error') or 'no result'}", http_exit(j.get('status'), err.get('code'))
+            if j['state'] == 'failed' else 1)
+    res = j.get('result')
+    if isinstance(res, dict) and 'exit_code' in res and 'stdout' in res:
+        emit(res)                                      # tg and llm-run: tgread's / llm-local's own output
+    if rec and isinstance(rec.get('argv'), list):
+        method, route = next(((m, r) for (m, r), op in JOB_ROUTES.items() if op == j['op']), (None, None))
+        return main(rec['argv'], client=ReplayClient(c, (method, route), j))
+    print(json.dumps(res, indent=1, ensure_ascii=False))
+    return 0
+
+
+def emit(res):
+    """tgread/llm-local style result: stdout, stderr, exit code."""
+    sys.stdout.write(res.get('stdout') or '')
+    sys.stderr.write(res.get('stderr') or '')
+    sys.stdout.flush()
+    sys.exit(int(res.get('exit_code') or 0))
+
+
+def no_raw_hint(what):
+    die(f'--raw is not available here: raw text needs the owner\'s OK. Ask with\n'
+        f'  vault raw request --source {what} --reason "why the owner wants it" --query \'{{...}}\'\n'
+        f'then: vault raw release REQUEST_ID (after his ✅ tap; fallback mode: the code he reads you)', 2)
+
+
+def raw_requested(r, release=None):
+    """After /raw/request: say how the owner decides and how to pick it up; exit 10 (waiting for him).
+    release: the follow-up command without the code (default: vault raw release ID)."""
+    rid = r['request_id']
+    release = release or f'vault raw release {rid}'
+    mins = r['valid_seconds'] // 60
+    if r.get('preparing'):
+        print(f'request {rid}: sent to the owner first; the vault prepares the text while he decides.')
+    if r.get('test_mode'):
+        print(f'request {rid}: TEST vault: nothing went to Telegram; the code is in its log (vault admin '
+              f'test-instance code). Valid {mins} min.\nRelease it with: {release} CODE')
+    elif r.get('approval') == 'buttons':
+        print(f'request {rid}: the owner got ✅ Allow once / ❌ Deny buttons on Telegram (valid {mins} min).\n'
+              f'After his tap: {release} [--wait S]   (no code; waits up to S s, default 100; exit 10 = not '
+              f'decided or the text not ready yet: ask again)')
+    else:
+        print(f"request {rid}: the owner got a 6-digit code on Telegram (fallback: the vault's bot is not polling; "
+              f"valid {mins} min, {r.get('attempts_allowed', 3)} tries).\nRelease it with: {release} CODE")
+    sys.exit(EXIT_CODE_PENDING)
+
+
+# ============================================================================================ tg
+
+def tg_parser():
+    p = argparse.ArgumentParser(prog='vault tg', description='tgread through the privacy vault')
+    sp = p.add_subparsers(dest='cmd', required=True)
+
+    def msg_opts(x, raw=True):
+        x.add_argument('--sync', action='store_true')
+        x.add_argument('--full', action='store_true')
+        x.add_argument('--llm-max-chars', type=int, dest='llm_max_chars')
+        x.add_argument('--json', action='store_true', dest='as_json', help='structured answers as JSON')
+        text_opts(x)
+        if raw:
+            x.add_argument('--raw', action='store_true')
+    s = sp.add_parser('search')
+    s.add_argument('query')
+    for o in ('--chat', '--since', '--until'):
+        s.add_argument(o)
+    s.add_argument('--from', dest='from_')
+    s.add_argument('-n', type=int)
+    s.add_argument('--context', type=int)
+    s.add_argument('--ask', help='answer this question over the hits (no text)')
+    s.add_argument('--kind', choices=ANSWER_KINDS, help='the answer kind for --ask (default short)')
+    for o in ('--any', '--substring', '--fts', '--expand'):
+        s.add_argument(o, action='store_true')
+    msg_opts(s)
+    r = sp.add_parser('recent')
+    r.add_argument('--chat')
+    r.add_argument('--from', dest='from_')
+    r.add_argument('-n', type=int)
+    g = r.add_mutually_exclusive_group()
+    g.add_argument('--hours', type=float)
+    g.add_argument('--since')
+    msg_opts(r)
+    u = sp.add_parser('unread-summary-data')
+    u.add_argument('--hours', type=float)
+    for o in ('--include-muted', '--include-archived', '--include-read'):
+        u.add_argument(o, action='store_true')
+    u.add_argument('--per-chat', type=int, dest='per_chat')
+    msg_opts(u)
+    m = sp.add_parser('summarize')
+    m.add_argument('--hours', type=float)
+    m.add_argument('--chat')
+    for o in ('--unread', '--include-muted', '--include-archived'):
+        m.add_argument(o, action='store_true')
+    m.add_argument('--per-chat', type=int, dest='per_chat')
+    for o in ('--since', '--until'):
+        m.add_argument(o)
+    m.add_argument('--chats', nargs='+')
+    msg_opts(m, raw=False)
+    wi = sp.add_parser('window', help='size of a summary window per chat and day: ids and counts only (JSON)')
+    wi.add_argument('--hours', type=float)
+    wi.add_argument('--chat')
+    wi.add_argument('--chats', nargs='+')
+    for o in ('--since', '--until'):
+        wi.add_argument(o)
+    for o in ('--unread', '--include-muted', '--include-archived', '--sync'):
+        wi.add_argument(o, action='store_true')
+    wi.add_argument('--per-chat', type=int, dest='per_chat')
+    c = sp.add_parser('chats')
+    c.add_argument('--type')
+    c.add_argument('--grep')
+    c.add_argument('--all', action='store_true')
+    c.add_argument('--raw', action='store_true')
+    pg = c.add_mutually_exclusive_group()
+    pg.add_argument('--pseudonyms', dest='pseudonyms', action='store_true', default=None)
+    pg.add_argument('--no-pseudonyms', dest='pseudonyms', action='store_false')
+    st = sp.add_parser('status')
+    st.add_argument('--check', action='store_true')
+    e = sp.add_parser('exclude')
+    e.add_argument('action', choices=['add', 'rm', 'list'])
+    e.add_argument('chats', nargs='*')
+    pu = sp.add_parser('purge')
+    pu.add_argument('chat')
+    pu.add_argument('--yes', action='store_true')
+    sy = sp.add_parser('sync')
+    sy.add_argument('--since')
+    sy.add_argument('--chats', nargs='+')
+    sy.add_argument('--quiet', action='store_true')
+    sy.add_argument('--max-seconds', type=int, dest='max_seconds')
+    w = sp.add_parser('wipe')
+    for o in ('--session', '--data', '--all', '--yes'):
+        w.add_argument(o, action='store_true')
+    sp.add_parser('allowlist')
+    sp.add_parser('selfcheck')
+    sp.add_parser('set-credentials')
+    lq = sp.add_parser('login-qr')
+    lq.add_argument('--out')
+    lq.add_argument('--timeout', type=int, default=180)
+    lq.add_argument('--password-stdin', action='store_true')
+    lq.add_argument('--password-file')
+    lq.add_argument('--force', action='store_true')
+    sp.add_parser('login-status')
+    sp.add_parser('login-cancel')
+    sp.add_parser('2fa')
+    al = sp.add_parser('alias')
+    al.add_argument('action', choices=['set', 'rm', 'list'])
+    al.add_argument('args', nargs='*')
+    al.add_argument('--tag')
+    fc = sp.add_parser('find-chat')
+    fc.add_argument('query')
+    fc.add_argument('--since')
+    fc.add_argument('-n', type=int)
+    wh = sp.add_parser('who')
+    wh.add_argument('name')
+    md = sp.add_parser('media')
+    md.add_argument('--chat', required=True)
+    md.add_argument('--type', choices=['pdf', 'photo', 'voice', 'video', 'audio', 'document'])
+    md.add_argument('--since')
+    md.add_argument('--grep')
+    md.add_argument('-n', type=int)
+    d = sp.add_parser('download')
+    d.add_argument('--chat', required=True)
+    d.add_argument('--msg', type=int, required=True)
+    d.add_argument('--out')
+    d.add_argument('--max-mb', type=int)
+    d.add_argument('--reason')
+    return p
+
+
+def tg_params(a):
+    skip = {'cmd', 'raw', 'quiet', 'from_', 'text', 'no_text', 'reason', 'as_json'}
+    params = {k: v for k, v in vars(a).items() if k not in skip and v is not None and v is not False}
+    params.update(text_body(a))
+    if getattr(a, 'from_', None):
+        params['from'] = a.from_
+    if a.cmd == 'chats' and a.pseudonyms is False:
+        params['pseudonyms'] = False
+    if a.cmd == 'exclude' and not a.chats:
+        params.pop('chats', None)
+    return params
+
+
+TEXT_CMDS = ('search', 'recent', 'unread-summary-data', 'summarize')
+ANSWER_KINDS = ('yesno', 'when', 'who', 'deadline', 'actionable', 'requests', 'count', 'short', 'interests', 'digest',
+                'mail_card')
+
+
+def text_opts(x):
+    """--text needs --reason and the owner's ✅; --no-text = the structured default."""
+    x.add_argument('--text', action='store_true', help="the text, only after the owner's ✅ (needs --reason)")
+    x.add_argument('--no-text', action='store_true', dest='no_text', help='the structured default (no text)')
+    x.add_argument('--reason', help='why (the owner reads it before he allows the text)')
+
+
+def text_body(a):
+    if getattr(a, 'text', False) and getattr(a, 'no_text', False):
+        die('--text and --no-text exclude each other', 2)
+    if getattr(a, 'text', False):
+        if not (a.reason and len(a.reason.strip()) >= 3):
+            die('--text needs --reason "why" (the owner reads it before he allows the text)', 2)
+        return {'text': True, 'reason': a.reason.strip()}
+    if getattr(a, 'no_text', False):
+        return {'text': False}
+    return {}
+
+
+def fmt_answer_value(ans):
+    if not isinstance(ans, dict):
+        return json.dumps(ans, ensure_ascii=False)
+    out = []
+    for k, v in ans.items():
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            out.append(f'{k}:')
+            out += ['  - ' + ', '.join(f'{kk}={vv}' for kk, vv in x.items() if vv not in (None, [], '')) for x in v]
+        elif v not in (None, [], ''):
+            out.append(f'{k}: {", ".join(map(str, v)) if isinstance(v, list) else v}')
+    return '\n'.join(out) or '(no answer)'
+
+
+def fmt_digest(r):
+    w = r.get('window') or {}
+    lines = [f"Digest: {w.get('messages', 0)} message(s) in {w.get('chats', 0)} chat(s), last {w.get('hours')} h"
+             + (f" (+{w['skipped_chats']} quieter chats not read)" if w.get('skipped_chats') else '')]
+    if r.get('needs_you'):
+        lines.append('Needs you:')
+        lines += [f"  - {x.get('chat')} · {x.get('from')} wants {x.get('wants')}" + (f" (due {x['due']})" if x.get('due')
+                  else '') + (f" [{' '.join(x['refs'])}]" if x.get('refs') else '') for x in r['needs_you']]
+    if r.get('plans'):
+        lines.append('Plans:')
+        lines += [f"  - {x.get('date')}" + (f" {x['start']}" if x.get('start') else '') + f" {x.get('what')}"
+                  + (f", {x['venue']}" if x.get('venue') else '') + (f" with {', '.join(x['with'])}" if x.get('with')
+                                                                      else '') + f" · {x.get('chat')}" for x in r['plans']]
+    if r.get('signals'):
+        lines.append('Signals: ' + '; '.join(f"{x.get('type')}/{x.get('topic')}" + (f" {x['who']}" if x.get('who')
+                                             else '') + f" ({x.get('chat')})" for x in r['signals']))
+    if r.get('topics'):
+        lines.append('Topics: ' + ', '.join(f'{k} {v}' for k, v in r['topics'].items()))
+    lines.append(f"({r.get('parts', 0)} part(s), {r.get('cached_parts', 0)} cached, {r.get('dropped', 0)} value(s) "
+                 f"dropped by the checks; no message text)")
+    return '\n'.join(lines)
+
+
+def fmt_card(r):
+    att = r.get('attachments') or {}
+    lines = [f"mail #{r.get('ref')} · {_hm(r.get('date'))} · from {r.get('from')} · {r.get('category')}"
+             + (f" · ❗ {r.get('action')}" if r.get('actionable') else '')
+             + (' · reply needed' if r.get('reply_needed') else '')]
+    if r.get('deadline'):
+        lines.append(f"deadline: {r['deadline']}")
+    ap = r.get('appointment') or {}
+    if ap:
+        lines.append('appointment: ' + ' '.join(str(ap[k]) for k in ('date', 'start', 'venue') if ap.get(k)))
+    if att.get('n'):
+        lines.append(f"attachments: {att['n']} ({att.get('pdf', 0)} PDF, {att.get('image', 0)} image)")
+    if r.get('urgency') not in (None, 'none'):
+        lines.append(f"urgency: {r['urgency']}")
+    if r.get('hint'):
+        lines.append(r['hint'])
+    if r.get('via'):
+        lines.append(f"(quick card from the {'live feed' if r['via'] == 'feed' else r['via']}; --deep for dates)")
+    return '\n'.join(lines)
+
+
+def show_result(r, as_json=False):
+    """A route's answer: a text request waiting for the owner (exit 10), tgread-style text, or a structured
+    answer."""
+    if isinstance(r, dict) and r.get('text_release') and r.get('request_id'):
+        raw_requested(r)
+    if isinstance(r, dict) and ('stdout' in r or 'exit_code' in r):
+        emit(r)
+    if as_json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    kind = r.get('kind')
+    sess = r.get('session') if isinstance(r, dict) else None
+    if isinstance(sess, dict) and 'ended' in sess and 'answer' not in r:
+        print(f"session {sess.get('id')}: " + (f"ended after {sess.get('turns')} turn(s)" if sess['ended']
+                                               else 'already gone'))
+        return 0
+    if kind == 'digest':
+        print(fmt_digest(r))
+    elif kind == 'hits':
+        print(f"{r.get('count')} hit(s) for {r.get('query')!r} since {r.get('since')} (no text):")
+        for h in r.get('hits') or []:
+            print(f"  {(h.get('ts') or '')[:16].replace('T', ' ')} · {h.get('chat')} · {h.get('from')} "
+                  f"[chat {h.get('chat_key')} {h.get('ref')}]")
+        if r.get('answer'):
+            print('Answer: ' + fmt_answer_value(r['answer'].get('answer')))
+    elif kind == 'mail_card':
+        print(fmt_card(r))
+    elif 'answer' in r:
+        where = r.get('chat') or r.get('query') or r.get('ref') or '?'
+        print(f"{r.get('kind')} · {where}" + (f" · {r['question']}" if r.get('question') else '')
+              + f" ({r.get('messages', 0)} message(s), {r.get('parts', 0)} part(s), {r.get('dropped', 0)} dropped)")
+        if isinstance(r.get('asked'), dict):         # the question's time words, resolved in the vault vs today
+            a = r['asked']
+            print(f"asked: {a.get('label')} = {a.get('from')}" + (f"..{a.get('to')}" if a.get('to') != a.get('from')
+                                                                  else '') + f" (today {r.get('today')})")
+        print(fmt_answer_value(r.get('answer')))
+    else:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+    if isinstance(sess, dict) and sess.get('id'):
+        print(f"session {sess['id']} · turn {r.get('turn', 1)} · {sess.get('turns_left')} follow-up(s) left · until "
+              f"{_hm(sess.get('expires'))}: vault ask --session {sess['id']} \"and …?\"")
+    return 0
+
+
+SESSION_ID = re.compile(r's-[a-z0-9]{6,16}')
+
+
+def session_argv(argv):
+    """--session (open) / --session ID or --session=ID (continue) / --end -> (argv without them, session, end). A
+    value after --session is an id only when it looks like one (s-xxxxxxxx), so a question after it stays a question."""
+    out, sess, end, i = [], None, False, 0
+    while i < len(argv):
+        a = argv[i]
+        if a == '--session':
+            if i + 1 < len(argv) and SESSION_ID.fullmatch(argv[i + 1]):
+                sess, i = argv[i + 1], i + 2
+                continue
+            sess = True
+        elif a.startswith('--session='):
+            sess = a.split('=', 1)[1]
+            if not SESSION_ID.fullmatch(sess):
+                die('--session=ID: an id like s-7k2qab4m from an earlier ask', 2)
+        elif a == '--end':
+            end = True
+        else:
+            out.append(a)
+        i += 1
+    return out, sess, end
+
+
+def cmd_ask_followup(c, sid, end, argv):
+    """vault ask --session ID "and where?" [--kind K] | --end: same scope, same messages."""
+    p = argparse.ArgumentParser(prog='vault ask --session ID', description='a follow-up in a vault ask session')
+    p.add_argument('words', nargs='*', help='the follow-up question')
+    p.add_argument('--kind', choices=[k for k in ANSWER_KINDS if k not in ('digest', 'mail_card')])
+    p.add_argument('--json', action='store_true')
+    a = p.parse_intermixed_args(argv)
+    words = a.words[1:] if a.words[:1] in (['tg'], ['gmail']) else a.words
+    if end:
+        return show_result(c.call('POST', '/answer', {'session': sid, 'end': True}, timeout=60), a.json)
+    if not words:
+        die('vault ask --session ID "follow-up question" [--kind K]  (or --end)', 2)
+    body = {'session': sid, 'question': ' '.join(words), 'kind': a.kind}
+    return show_result(c.call('POST', '/answer', {k: v for k, v in body.items() if v is not None}, timeout=LONG),
+                       a.json)
+
+
+def cmd_ask(c, argv):
+    """Answers, not text. --session: follow-ups over the same messages."""
+    argv, sess, end = session_argv(argv)
+    if isinstance(sess, str):
+        return cmd_ask_followup(c, sess, end, argv)
+    if end:
+        die('--end needs the session: vault ask --session ID --end', 2)
+    p = argparse.ArgumentParser(prog='vault ask', description='an answer from the vault (checked values, no text); '
+                                '--session opens a follow-up session: vault ask --session ID "and where?"')
+    p.add_argument('source', choices=['tg', 'gmail'])
+    p.add_argument('args', nargs='*', help='gmail: REF ["question"]; tg: ["question"]')
+    p.add_argument('--chat', help='tg: one chat (id, alias or name)')
+    p.add_argument('--search', help='tg: answer over the search hits for this query')
+    p.add_argument('--since', help='tg window, e.g. 30d (default), 12w, 2026-09-01')
+    p.add_argument('--kind', choices=ANSWER_KINDS)
+    p.add_argument('-n', type=int)
+    p.add_argument('--account')
+    p.add_argument('--retrieval', choices=['hybrid', 'keyword'], help='tg: hybrid = keyword + semantic index (default: the vault\'s)')
+    p.add_argument('--chars', type=int, help='tg hybrid: context budget 500-4500 (default 2000)')
+    p.add_argument('--json', action='store_true')
+    a = p.parse_intermixed_args(argv)
+    body = {'source': a.source, 'kind': a.kind, 'since': a.since, 'n': a.n}
+    if a.source == 'tg':
+        body.update(retrieval=a.retrieval, chars=a.chars)
+    if a.source == 'gmail':
+        if not a.args:
+            die('vault ask gmail REF ["question"]', 2)
+        body.update(ref=a.args[0], question=' '.join(a.args[1:]) or None, account=a.account)
+    else:
+        if bool(a.chat) == bool(a.search) and a.kind != 'digest':
+            die('vault ask tg: give --chat C or --search Q', 2)
+        body.update(chat=a.chat, query=a.search, question=' '.join(a.args) or None)
+    if sess:
+        body['session'] = True
+    body = {k: v for k, v in body.items() if v is not None}
+    return show_result(c.call('POST', '/answer', body, timeout=LONG), a.json)
+
+
+def parse_creds(text):
+    text = text.strip()
+    try:
+        d = json.loads(text)
+        return str(d['api_id']), str(d['api_hash'])
+    except (ValueError, KeyError, TypeError):
+        pass
+    vals = dict(re.findall(r'(?i)\b(api_id|api_hash)\s*[:=]\s*(\S+)', text))
+    if len(vals) == 2:
+        return vals['api_id'], vals['api_hash']
+    toks = text.split()
+    if len(toks) == 2:
+        return toks[0], toks[1]
+    die('set-credentials: give api_id and api_hash on stdin (two lines, "api_id=... api_hash=...", or JSON)', 2)
+
+
+def write_private(path, data):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+
+
+def tg_login(c, a):
+    if a.force:
+        die('login-qr --force: wipe the old session first (vault tg wipe --session --yes)', 2)
+    if a.password_file:
+        die('login-qr --password-file is not used with the vault: pipe the password into `vault tg 2fa`, or use '
+            '--password-stdin', 2)
+    out = a.out or os.path.join(HOME, '.cache', 'vault', 'login-qr.png')
+    snap = c.call('POST', '/tg/login-qr', {'timeout': a.timeout}, timeout=60)
+    seen_mtime, printed, sent_pw = None, set(), False
+    deadline = time.time() + a.timeout + 400
+    try:
+        while time.time() < deadline:
+            for ln in snap.get('lines') or []:
+                if ln not in printed and not ln.startswith(('QR_READY', 'QR_REFRESHED')):
+                    printed.add(ln)
+                    print(ln, flush=True)
+            if snap.get('qr_png_b64') and snap.get('qr_mtime') != seen_mtime:
+                write_private(out, base64.b64decode(snap['qr_png_b64']))
+                word = 'QR_READY' if seen_mtime is None else 'QR_REFRESHED'
+                seen_mtime = snap.get('qr_mtime')
+                print(f"{word} path={out} expires_in={snap.get('expires_in', '?')}s", flush=True)
+            state = snap.get('state')
+            if state in ('PASSWORD_NEEDED', 'PASSWORD_INVALID') and a.password_stdin and not sent_pw:
+                pw = sys.stdin.readline().rstrip('\n')
+                if not pw:
+                    die('no 2FA password on stdin', 2)
+                c.call('POST', '/tg/2fa', {'password': pw}, timeout=60)
+                pw, sent_pw = None, True
+            if state == 'PASSWORD_INVALID':
+                sent_pw = False
+            if state in ('PASSWORD_NEEDED', 'PASSWORD_INVALID') and not a.password_stdin:
+                print(f'{state}: the vault waits for the 2FA password (until ~10 min after the login started).\n'
+                      f'Best: the owner types it himself on Unraid (Docker tab > claude-vault > Console, or the\n'
+                      f'terminal): vault-console 2fa   (terminal: docker exec -it claude-vault vault-console 2fa)\n'
+                      f"If he sends it to me instead: printf '%s\\n' 'PASSWORD' | vault tg 2fa\n"
+                      f'then check: vault tg login-status', flush=True)
+                seen_mtime = None                      # keep nothing on disk
+                return EXIT_CODE_PENDING
+            if not snap.get('running') and state not in ('starting',):
+                break
+            time.sleep(2)
+            snap = c.call('GET', '/tg/login', timeout=60)
+    finally:
+        if os.path.exists(out) and seen_mtime is not None:
+            try:
+                os.remove(out)                         # the QR is single-use; don't leave it around
+            except OSError:
+                pass
+    st = snap.get('state')
+    if st in ('LOGIN_OK', 'ALREADY_LOGGED_IN'):
+        print('the vault is logged in; it syncs the last 7 days now, then every 15 min')
+        return 0
+    print(f'login ended: {st} (exit {snap.get("exit_code")})', file=sys.stderr)
+    return 3 if st == 'LOGIN_TIMEOUT' else 1
+
+
+def cmd_tg(c, argv):
+    if argv[:1] == ['ask']:                            # tgread ask = vault ask tg
+        return cmd_ask(c, ['tg'] + argv[1:])
+    if argv[:1] == ['events']:                         # the event feed, Telegram only (vault events = all sources)
+        return cmd_events(c, argv[1:], source='telegram')
+    if argv and argv[0] in ('-h', '--help'):
+        tg_parser().print_help()
+        return 0
+    a = tg_parser().parse_args(argv)
+    if getattr(a, 'raw', False):
+        no_raw_hint('tg')
+    if a.cmd == 'set-credentials':
+        api_id, api_hash = parse_creds(sys.stdin.read())
+        emit(c.call('POST', '/tg/credentials', {'api_id': api_id, 'api_hash': api_hash}, timeout=120))
+    if a.cmd == 'login-qr':
+        return tg_login(c, a)
+    if a.cmd == 'login-status':
+        snap = c.call('GET', '/tg/login')
+        snap.pop('qr_png_b64', None)
+        print(json.dumps(snap, indent=1, ensure_ascii=False))
+        return 0
+    if a.cmd == 'login-cancel':
+        print(json.dumps(c.call('POST', '/tg/login-cancel', {})))
+        return 0
+    if a.cmd == '2fa':
+        pw = sys.stdin.readline().rstrip('\n')
+        if not pw:
+            die('2fa: give the password on stdin', 2)
+        print(json.dumps(c.call('POST', '/tg/2fa', {'password': pw}, timeout=60)))
+        return 0
+    if a.cmd == 'media':
+        return media_list(c, {'source': 'tg', 'chat': a.chat, 'type': a.type, 'since': a.since, 'grep': a.grep,
+                              'n': a.n})
+    if a.cmd == 'alias' and not a.args:
+        a.args = None
+    if a.cmd == 'download':
+        if not a.reason:
+            die('download needs --reason (the vault asks the owner on Telegram)', 2)
+        r = c.call('POST', '/raw/request', {'source': 'tg-file', 'reason': a.reason,
+                                            'query': {'chat': a.chat, 'msg': a.msg}}, timeout=900)
+        raw_requested(r, f"vault raw release {r['request_id']} --out DIR")
+    return show_result(c.call('POST', f'/tg/{a.cmd}', tg_params(a), timeout=LONG), getattr(a, 'as_json', False))
+
+
+# ============================================================================================ paperless
+
+def fmt_doc(d):
+    tags = ', '.join(d.get('tags') or []) or '-'
+    return (f"#{d['id']}  {d.get('created') or ''}  {d.get('title')}  | corr: {d.get('correspondent') or '-'} | "
+            f"type: {d.get('document_type') or '-'} | tags: {tags}")
+
+
+def pl_parser():
+    p = argparse.ArgumentParser(prog='vault paperless', description='paperless-ngx through the privacy vault')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    u = sp.add_parser('upload')
+    u.add_argument('file')
+    u.add_argument('--title')
+    u.add_argument('--tag', action='append')
+    u.add_argument('--correspondent')
+    u.add_argument('--type')
+    u.add_argument('--created')
+    u.add_argument('--create', action='store_true')
+    u.add_argument('--no-wait', action='store_true')
+    u.add_argument('--timeout', type=int, default=180)
+    s = sp.add_parser('search')
+    s.add_argument('query', nargs='+')
+    s.add_argument('-n', type=int, default=5)
+    s.add_argument('--json', action='store_true', help='metadata as JSON {count, results} (bills scan-paperless)')
+    r = sp.add_parser('recent')
+    r.add_argument('-n', type=int, default=5)
+    r.add_argument('--json', action='store_true', help='metadata as JSON {results}')
+    g = sp.add_parser('get', help='a card: metadata + amount/currency/due date, never content')
+    g.add_argument('id', type=int)
+    g.add_argument('--content', action='store_true', help="the anonymized text: asks the owner (✅), needs --reason")
+    g.add_argument('--reason', help='shown to the owner (with --content)')
+    g.add_argument('--chars', type=int, default=20000, help='with --content: how much text (max 100000)')
+    g.add_argument('--json', action='store_true')
+    f = sp.add_parser('fields')
+    f.add_argument('id', type=int)
+    f.add_argument('--fields', help='comma-separated; default: the tier-1 bill set')
+    f.add_argument('--reason', help='tier-2 fields (IBAN, reference, numbers, addresses, dates): asks the owner (✅)')
+    sg = sp.add_parser('suggest', help='type/correspondent/tags from the existing names (read inside the vault)')
+    sg.add_argument('id', type=int)
+    sg.add_argument('--chars', type=int, help='how much text the local model reads (200..20000, default 3000)')
+    sg.add_argument('--json', action='store_true')
+    d = sp.add_parser('download')
+    d.add_argument('id', type=int)
+    d.add_argument('out')
+    d.add_argument('--archived', action='store_true')
+    d.add_argument('--reason')
+    sp.add_parser('meta')
+    t = sp.add_parser('task')
+    t.add_argument('task_id')
+    t.add_argument('--timeout', type=int, default=180)
+    st = sp.add_parser('set', help="change a document's metadata (never its content)")
+    st.add_argument('id', type=int)
+    st.add_argument('--title')
+    st.add_argument('--created', help='YYYY-MM-DD')
+    st.add_argument('--type', help='document type name')
+    st.add_argument('--correspondent')
+    st.add_argument('--tag', action='append', default=[], metavar='+NAME|-NAME',
+                    help='+NAME adds the tag, -NAME removes it (a bare NAME adds); repeat')
+    st.add_argument('--create', action='store_true', help='create a missing type, correspondent or tag')
+    st.add_argument('--json', action='store_true')
+    rl = sp.add_parser('rule', help='matching rule of a tag, document type or correspondent')
+    rsub = rl.add_subparsers(dest='rule_cmd', required=True)
+    rt = rsub.add_parser('test', help='which documents a rule would hit (ids + current values; nothing changes)')
+    rt.add_argument('kind', choices=sorted(RULE_KINDS))
+    mt = rt.add_mutually_exclusive_group(required=True)
+    mt.add_argument('--regex', metavar='R')
+    mt.add_argument('--any', metavar='WORDS')
+    mt.add_argument('--all', metavar='WORDS')
+    mt.add_argument('--literal', metavar='TEXT')
+    mt.add_argument('--fuzzy', metavar='TEXT')
+    rt.add_argument('--case-sensitive', action='store_true')
+    rt.add_argument('--name', help='the tag/type/correspondent the rule would set: marks documents it would change')
+    rt.add_argument('--json', action='store_true')
+    rs = rsub.add_parser('set', help='create or update a rule')
+    rs.add_argument('kind', choices=sorted(RULE_KINDS))
+    rs.add_argument('name')
+    m = rs.add_mutually_exclusive_group()
+    m.add_argument('--regex', metavar='R', help='regular expression (max 256 chars)')
+    m.add_argument('--any', metavar='WORDS', help='any of these words')
+    m.add_argument('--all', metavar='WORDS', help='all of these words')
+    m.add_argument('--literal', metavar='TEXT', help='this exact text')
+    m.add_argument('--fuzzy', metavar='TEXT', help='fuzzy match of this text')
+    m.add_argument('--auto', action='store_true', help="paperless' own classifier (needs ~20 docs per class)")
+    m.add_argument('--none', action='store_true', help='no automatic matching')
+    rs.add_argument('--case-sensitive', action='store_true', help='default: case-insensitive')
+    ib = rs.add_mutually_exclusive_group()
+    ib.add_argument('--inbox', action='store_true', help='tags only: put it on every new document')
+    ib.add_argument('--no-inbox', action='store_true')
+    rs.add_argument('--create', action='store_true', help='create the tag/type/correspondent if it is missing')
+    rs.add_argument('--json', action='store_true')
+    rr = sp.add_parser('rules', help='matching rules (names and match settings only)')
+    rr.add_argument('kind', nargs='?', choices=sorted(RULE_KINDS))
+    rr.add_argument('--json', action='store_true')
+    return p
+
+
+RULE_KINDS = {'tag': 'tags', 'type': 'document_types', 'correspondent': 'correspondents'}
+MATCH_ALGORITHMS = ('none', 'any', 'all', 'literal', 'regex', 'fuzzy', 'auto')     # paperless MATCH_* 0..6
+
+
+def tag_args(argv):
+    """`--tag -Inbox` would look like an option to argparse: glue it into `--tag=-Inbox`."""
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] == '--tag' and i + 1 < len(argv):
+            out.append('--tag=' + argv[i + 1])
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
+
+
+def fmt_rule(r):
+    alg = r.get('algorithm')
+    if alg is None:
+        how = 'rule unknown (vault not updated?)'
+    elif alg == 'none':
+        how = 'no automatic matching'
+    elif alg == 'auto':
+        how = "auto (paperless' classifier)"
+    elif not (r.get('match') or '').strip():
+        how = f'{alg}, no match text (matches nothing)'
+    else:
+        how = f"{alg} \"{r['match']}\" ({'case-insensitive' if r.get('is_insensitive') else 'case-sensitive'})"
+    return (f"{r['name']}  [id {r['id']}, {r.get('document_count', '?')} docs]  {how}"
+            + ('  · inbox tag' if r.get('is_inbox_tag') else ''))
+
+
+def cmd_paperless(c, argv):
+    a = pl_parser().parse_args(tag_args(argv) if argv[:1] == ['set'] else argv)
+    if a.cmd == 'search':
+        d = c.call('POST', '/paperless/search', {'q': ' '.join(a.query), 'n': a.n}, timeout=120)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False))
+            return 0
+        if not d['results']:
+            print('no matches')
+            return 0
+        print(f"{d['count']} match(es), showing {len(d['results'])}:")
+        for doc in d['results']:
+            print(fmt_doc(doc))
+    elif a.cmd == 'recent':
+        d = c.call('POST', '/paperless/recent', {'n': a.n}, timeout=300)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False))
+            return 0
+        for doc in d['results']:
+            print(fmt_doc(doc) + f"  (added {doc.get('added') or ''})")
+    elif a.cmd == 'get':
+        if a.content:
+            if not a.reason:
+                die('--content asks the owner (✅ on Telegram): give --reason (shown to him); then '
+                    '`vault raw release ID`', 2)
+            chars = min(max(a.chars, 1), 100_000)
+            r = c.call('POST', '/raw/request', {'source': 'paperless-anon', 'reason': a.reason,
+                                                'query': {'id': a.id, 'chars': chars}}, timeout=LONG)
+            raw_requested(r)
+        d = c.call('POST', '/paperless/get', {'id': a.id}, timeout=600)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False))
+            return 0
+        print(fmt_doc(d))
+        money = f"{d.get('currency') or ''} {d['amount']}".strip() if d.get('amount') else '-'
+        print(f"added: {d.get('added') or '?'}  pages: {d.get('page_count')}  amount: {money}  "
+              f"due: {d.get('due_date') or '-'}")
+        print(f"url: {d.get('url')}")
+        for w in d.get('_warnings') or []:
+            print(f'note: {w}')
+        print('privacy: a card, no content. Fields: paperless fields ID; content: paperless get ID --content '
+              '--reason R (the owner ✅)')
+    elif a.cmd == 'fields':
+        body = {'id': a.id}
+        if a.fields:
+            body['fields'] = [x.strip() for x in a.fields.split(',') if x.strip()]
+        if a.reason:
+            r = c.call('POST', '/raw/request', {'source': 'paperless-fields', 'reason': a.reason, 'query': body},
+                       timeout=3600)
+            raw_requested(r)
+        d = c.call('POST', '/paperless/fields', body, timeout=3600)
+        print(json.dumps(d, indent=1, ensure_ascii=False))
+        if d.get('_withheld'):
+            print(f"withheld (tier 2, needs the owner's ✅): {', '.join(d['_withheld'])}; ask with --reason R",
+                  file=sys.stderr)
+    elif a.cmd == 'suggest':
+        body = {'id': a.id}
+        if a.chars:
+            body['chars'] = a.chars
+        d = c.call('POST', '/paperless/suggest', body, timeout=LONG)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False))
+            return 0
+        cur, sug, ch = d.get('current') or {}, d.get('suggested') or {}, d.get('changes') or {}
+        print(f"#{d['id']} now: type {cur.get('document_type') or '-'} | corr: {cur.get('correspondent') or '-'} | "
+              f"tags: {', '.join(cur.get('tags') or []) or '-'}")
+        print(f"suggested: type {sug.get('document_type') or '-'} | corr: {sug.get('correspondent') or '-'} | "
+              f"tags: {', '.join(sug.get('tags') or []) or '-'}")
+        if ch:
+            cmd = [f"paperless set {d['id']}"]
+            if ch.get('document_type'):
+                cmd.append(f"--type {shlex.quote(ch['document_type'])}")
+            if ch.get('correspondent'):
+                cmd.append(f"--correspondent {shlex.quote(ch['correspondent'])}")
+            cmd += [f"--tag {shlex.quote('+' + t)}" for t in ch.get('tags_add') or []]
+            print('apply: ' + ' '.join(cmd))
+        else:
+            print('no changes suggested')
+        for w in d.get('_warnings') or []:
+            print(f'note: {w}')
+    elif a.cmd == 'meta':
+        d = c.call('GET', '/paperless/meta', timeout=120)
+        for kind in ('tags', 'correspondents', 'document_types'):
+            print(f"{kind.replace('_', ' ')} ({len(d[kind])}):")
+            for o in d[kind]:
+                print(f"  {o['name']}  [id {o['id']}, {o.get('document_count', '?')} docs]")
+    elif a.cmd == 'upload':
+        if not os.path.isfile(a.file):
+            die(f'no such file: {a.file}')
+        with open(a.file, 'rb') as fh:
+            data = fh.read()
+        body = {'filename': os.path.basename(a.file), 'content_b64': base64.b64encode(data).decode(),
+                'title': a.title, 'created': a.created, 'correspondent': a.correspondent, 'document_type': a.type,
+                'tags': a.tag or [], 'create': a.create, 'wait': not a.no_wait, 'timeout': a.timeout}
+        body = {k: v for k, v in body.items() if v not in (None, [])}
+        r = c.call('POST', '/paperless/upload', body, timeout=a.timeout + 300)
+        print(f"uploaded, task {r['task_id']}", file=sys.stderr)
+        if 'document_id' in r:
+            print(f"document {r['document_id']}: {r['url']}")
+        elif r.get('timed_out'):
+            die(f"timed out after {a.timeout}s waiting for task {r['task_id']} (status {r.get('status')}; check later "
+                f"with `paperless task {r['task_id']}`)", 2)
+        else:
+            print(f"task {r['task_id']} queued")
+    elif a.cmd == 'task':
+        r = c.call('POST', '/paperless/task', {'task_id': a.task_id, 'timeout': a.timeout}, timeout=a.timeout + 60)
+        if 'document_id' in r:
+            print(f"document {r['document_id']}: {r['url']}")
+        else:
+            die(f"timed out after {a.timeout}s waiting for task {a.task_id} (status {r.get('status')})", 2)
+    elif a.cmd == 'download':
+        if not a.reason:
+            die('download through the vault needs --reason (the owner is asked on Telegram); then '
+                f'`vault raw release ID --out {a.out}`', 2)
+        r = c.call('POST', '/raw/request', {'source': 'paperless-file', 'reason': a.reason,
+                                            'query': {'id': a.id, 'archived': a.archived}}, timeout=600)
+        raw_requested(r, f"vault raw release {r['request_id']} --out {a.out or 'PATH'}")
+    elif a.cmd == 'set':
+        add, rm = [], []
+        for t in a.tag:
+            sign, name = (t[0], t[1:].strip()) if t[:1] in ('+', '-') else ('+', t.strip())
+            if not name or name[0] in '+-':
+                die(f'bad --tag {t!r}: +NAME adds a tag, -NAME removes it', 2)
+            (add if sign == '+' else rm).append(name)
+        body = {'id': a.id, 'title': a.title, 'created': a.created, 'document_type': a.type,
+                'correspondent': a.correspondent, 'tags_add': add, 'tags_remove': rm, 'create': a.create or None}
+        body = {k: v for k, v in body.items() if v not in (None, [])}
+        if set(body) <= {'id', 'create'}:
+            die('nothing to change: give --title, --created, --type, --correspondent or --tag +ADD/-REMOVE', 2)
+        d = c.call('POST', '/paperless/update', body, timeout=180)
+        if a.json:
+            print(json.dumps(d, ensure_ascii=False))
+            return 0
+        print(fmt_doc(d))
+        print('changed: ' + (', '.join(d.get('changed') or []) or 'nothing (it was already so)'))
+    elif a.cmd == 'rule' and a.rule_cmd == 'test':
+        alg = next(x for x in ('regex', 'any', 'all', 'literal', 'fuzzy') if getattr(a, x) is not None)
+        body = {'kind': RULE_KINDS[a.kind], 'match': getattr(a, alg), 'matching_algorithm': MATCH_ALGORITHMS.index(alg),
+                'is_insensitive': not a.case_sensitive}
+        if a.name:
+            body['name'] = a.name
+        r = c.call('POST', '/paperless/rule-test', body, timeout=600)
+        if a.json:
+            print(json.dumps(r, ensure_ascii=False))
+            return 0
+        print(f"{a.kind} rule ({r['algorithm']}{'' if r['is_insensitive'] else ', case-sensitive'}): {r['count']} of "
+              f"{r['checked']} documents match")
+        for m in r['matches']:
+            cur = ', '.join(m['current']) if isinstance(m['current'], list) else (m['current'] or '-')
+            flag = '' if 'would_change' not in m else ('  -> would change' if m['would_change'] else '  (already so)')
+            print(f"  #{m['id']}  now: {cur or '-'}{flag}")
+    elif a.cmd == 'rule':
+        kind = RULE_KINDS[a.kind]
+        body = {'kind': kind, 'name': a.name}
+        for alg in ('regex', 'any', 'all', 'literal', 'fuzzy'):
+            if getattr(a, alg) is not None:
+                body.update(match=getattr(a, alg), matching_algorithm=MATCH_ALGORITHMS.index(alg),
+                            is_insensitive=not a.case_sensitive)
+        if a.auto or a.none:
+            body['matching_algorithm'] = MATCH_ALGORITHMS.index('auto' if a.auto else 'none')
+        if a.case_sensitive and 'is_insensitive' not in body:
+            body['is_insensitive'] = False
+        if a.inbox or a.no_inbox:
+            if kind != 'tags':
+                die('--inbox / --no-inbox only apply to tags', 2)
+            body['is_inbox_tag'] = bool(a.inbox)
+        if set(body) == {'kind', 'name'}:
+            die('nothing to set: give --regex R, --any/--all/--literal/--fuzzy TEXT, --auto, --none, '
+                '--case-sensitive or --inbox/--no-inbox', 2)
+        if a.create:
+            body['create'] = True
+        r = c.call('POST', '/paperless/taxonomy', body, timeout=120)
+        if a.json:
+            print(json.dumps(r, ensure_ascii=False))
+            return 0
+        print(f"{a.kind} {r['action']}: {fmt_rule(r)}")
+        if r.get('changed'):
+            print('changed: ' + ', '.join(r['changed']))
+    elif a.cmd == 'rules':
+        d = c.call('GET', '/paperless/meta', timeout=120)
+        kinds = [RULE_KINDS[a.kind]] if a.kind else ['tags', 'document_types', 'correspondents']
+        if a.json:
+            print(json.dumps({k: d[k] for k in kinds}, ensure_ascii=False))
+            return 0
+        for kind in kinds:
+            print(f"{kind.replace('_', ' ')} ({len(d[kind])}):")
+            for o in d[kind]:
+                print('  ' + fmt_rule(o))
+    return 0
+
+
+# ============================================================================================ raw, audit, alerts
+
+def cmd_raw(c, argv):
+    p = argparse.ArgumentParser(prog='vault raw')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    rq = sp.add_parser('request')
+    rq.add_argument('--source', required=True,
+                    choices=['tg', 'tg-file', 'paperless', 'paperless-anon', 'paperless-fields', 'paperless-file',
+                             'firefly', 'gmail', 'location', 'test'])
+    rq.add_argument('--reason', required=True, help='shown to the owner')
+    rq.add_argument('--query', help='JSON object, e.g. {"cmd":"search","query":"concert","chat":"Sam","n":20}')
+    rq.add_argument('--id', type=int, help='paperless document id')
+    rq.add_argument('--chars', type=int)
+    rq.add_argument('--archived', action='store_true')
+    rq.add_argument('--chat')
+    rq.add_argument('--msg', type=int)
+    rq.add_argument('--uid', help='gmail: the mail REF (main:1234 or work:1234@Folder)')
+    rq.add_argument('--account', help='gmail: the account label (when the REF does not carry it)')
+    rq.add_argument('--folder', help='gmail: folder/label (default INBOX)')
+    rq.add_argument('--attachment', type=int, help='gmail: that attachment as a file')
+    rq.add_argument('--eml', action='store_true', help='gmail: the whole mail as an .eml file')
+    rl = sp.add_parser('release')
+    rl.add_argument('request_id')
+    rl.add_argument('code', nargs='?', help='only for a fallback-code request (the owner reads it to you)')
+    rl.add_argument('--out', help='file or directory (required for files)')
+    rl.add_argument('--wait', type=int, default=100, help='seconds to wait for his decision (default 100, max 3600)')
+    rl.add_argument('--no-wait', action='store_true', help='ask once; exit 10 if he has not decided yet')
+    sp.add_parser('pending')
+    a = p.parse_args(argv)
+    if a.cmd == 'pending':
+        print(json.dumps(c.call('GET', '/raw/pending')['requests'], indent=1, ensure_ascii=False))
+        return 0
+    if a.cmd == 'request':
+        q = {}
+        if a.query:
+            try:
+                q = json.loads(a.query)
+            except ValueError:
+                die('--query must be a JSON object', 2)
+        for k in ('id', 'chars', 'chat', 'msg', 'uid', 'folder', 'account', 'attachment'):
+            if getattr(a, k) is not None:
+                q[k] = getattr(a, k)
+        if a.archived:
+            q['archived'] = True
+        if a.eml:
+            q['eml'] = True
+        raw_requested(c.call('POST', '/raw/request', {'source': a.source, 'reason': a.reason, 'query': q},
+                             timeout=1800))
+    body = {'request_id': a.request_id}
+    if a.code:
+        body['code'] = a.code
+    r, pend = release_poll(c, '/raw/release', body, a.wait, a.no_wait)   # first a quick look, then long polls
+    if r is None:
+        print(pending_line('request', a.request_id, pend, f'vault raw release {a.request_id} [--wait S]'),
+              file=sys.stderr)
+        sys.exit(EXIT_CODE_PENDING)
+    print(f"request {a.request_id}: released ({r['kind']})", file=sys.stderr)
+    if r['kind'] == 'file':
+        if not a.out:
+            out = os.path.join(HOME, 'Downloads', 'vault')
+            os.makedirs(out, exist_ok=True)
+        else:
+            out = a.out
+        if os.path.isdir(out):
+            out = os.path.join(out, os.path.basename(r['filename']) or 'vault-file')
+        write_private(out, base64.b64decode(r['content_b64']))
+        print(f"saved {out} ({r['bytes']} bytes)")
+    elif a.out:
+        write_private(a.out, r['text'])
+        print(f'saved {a.out} ({len(r["text"])} characters, raw: private)')
+    else:
+        sys.stdout.write(r['text'] if r['text'].endswith('\n') else r['text'] + '\n')
+    return 0
+
+
+# ============================================================================================ media
+
+MEDIA_DIR = os.path.join(HOME, '.cache', 'vault', 'media')
+MEDIA_STATE = os.path.join(HOME, '.local', 'state', 'vault', 'media.json')
+MEDIA_LAST = os.path.join(HOME, '.local', 'state', 'vault', 'media-last.json')
+KEEP_MAX_MIN = 120                                   # released files stay 2 h by default, never longer
+
+
+def hsize(n):
+    if n is None:
+        return 'size ?'
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
+        n /= 1024
+
+
+def media_records():
+    try:
+        return json.loads(read_file(MEDIA_STATE))
+    except (OSError, ValueError):
+        return {}
+
+
+def media_write_records(recs):
+    write_private(MEDIA_STATE, json.dumps(recs, indent=1))
+
+
+def media_list(c, body, as_json=False):
+    r = c.call('POST', '/media/list', {k: v for k, v in body.items() if v is not None}, timeout=1800)
+    if as_json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+    else:
+        print(f"{r['count']} file(s) · {r['where']} (metadata only; names privacy-filtered)")
+        for i, it in enumerate(r['items'], 1):
+            bits = [it.get('type') or '?'] + ([f"{it['pages']} p."] if it.get('pages') else []) + \
+                ([f"{it['duration']} s"] if it.get('duration') else []) + [hsize(it.get('size'))]
+            when = re.sub(r'^(\d{4}-\d\d-\d\d)T(\d\d:\d\d).*$', r'\1 \2', str(it.get('date') or '?'))
+            print(f"{i:>2}. {when}  {it.get('name') or '(no name)'}  ({', '.join(bits)})  "
+                  + (f"from {it['from']}  " if it.get('from') else '') + f"[{it['key']}]")
+    write_private(MEDIA_LAST, json.dumps({'keys': [it['key'] for it in r['items']], 'at': time.time()}))
+    return 0
+
+
+def media_pick(spec):
+    try:
+        keys = json.loads(read_file(MEDIA_LAST))['keys']
+        return [keys[int(x) - 1] for x in str(spec).replace(' ', '').split(',') if x]
+    except (OSError, ValueError, KeyError, IndexError):
+        die(f'--pick {spec}: run `vault media list ...` first and pick its numbers', 2)
+
+
+def media_save(c, r):
+    """Released files -> MEDIA_DIR/<rid>/<cleaned name> (folders 0700, files 0600), each checked against its sha256,
+    recorded in MEDIA_STATE with its deletion time, and reported 'saved' to the vault's audit."""
+    rid = re.sub(r'[^0-9a-f]', '', str(r['request_id']))[:40] or 'unknown'
+    os.makedirs(MEDIA_DIR, mode=0o700, exist_ok=True)
+    for d in (os.path.dirname(MEDIA_DIR), MEDIA_DIR):
+        os.chmod(d, 0o700)
+    target = os.path.join(MEDIA_DIR, rid)
+    os.makedirs(target, mode=0o700, exist_ok=True)
+    os.chmod(target, 0o700)
+    files, used = [], set()
+    for f in r['files']:
+        data = base64.b64decode(f['content_b64'])
+        if hashlib.sha256(data).hexdigest() != f['sha256']:
+            shutil.rmtree(target, ignore_errors=True)
+            die(f'media {rid}: a file does not match its sha256; nothing was kept', 1)
+        name = re.sub(r'[/\\\x00]', '_', os.path.basename(str(f.get('name') or 'file'))).lstrip('.') or 'file'
+        while name in used:
+            name = '_' + name
+        used.add(name)
+        p = os.path.join(target, name)
+        write_private(p, data)
+        files.append({'path': p, 'sha256': f['sha256'], 'size': len(data)})
+    keep = min(int(r.get('keep_minutes') or KEEP_MAX_MIN), KEEP_MAX_MIN)
+    recs = media_records()
+    now = time.time()
+    recs[r['request_id']] = {'dir': target, 'files': files, 'saved': now, 'delete_by': now + keep * 60,
+                             'deleted': None, 'acked': []}
+    media_write_records(recs)
+    try:
+        c.call('POST', '/media/ack', {'request_id': r['request_id'], 'event': 'saved',
+                                      'files': [f['sha256'] for f in files]})
+        recs[r['request_id']]['acked'].append('saved')
+        media_write_records(recs)
+    except (Exception, SystemExit):
+        pass
+    return [f['path'] for f in files]
+
+
+def media_gc(c, now=None, quiet=False):
+    """Delete released files whose time is up and report 'deleted' to the vault (cron every 5 min and on every
+    `vault` call); a failed report is retried next time. The vault alerts when a 'deleted' report is overdue."""
+    now = time.time() if now is None else now
+    recs = media_records()
+    if not recs:
+        return 0
+    changed, n, err = False, 0, sys.stderr
+    if quiet:
+        sys.stderr = open(os.devnull, 'w')
+    try:
+        for rid, rec in recs.items():
+            if not rec.get('deleted') and now >= rec.get('delete_by', 0):
+                shutil.rmtree(rec['dir'], ignore_errors=True)
+                rec['deleted'], changed, n = now, True, n + 1
+                if not quiet:
+                    print(f"media {rid}: deleted {len(rec['files'])} file(s)")
+            if rec.get('deleted') and 'deleted' not in rec.get('acked', []):
+                try:
+                    c.call('POST', '/media/ack', {'request_id': rid, 'event': 'deleted',
+                                                  'files': [f['sha256'] for f in rec['files']]})
+                    rec.setdefault('acked', []).append('deleted')
+                    changed = True
+                except (Exception, SystemExit):
+                    pass
+        old = [r for r, x in recs.items() if x.get('deleted') and now - x['deleted'] > (
+            7 if 'deleted' in x.get('acked', []) else 14) * 86400]
+        for rid in old:
+            del recs[rid]
+            changed = True
+        if changed:
+            media_write_records(recs)
+    finally:
+        if quiet:
+            sys.stderr.close()
+            sys.stderr = err
+    return n
+
+
+def media_release(c, rid, wait=100, no_wait=False, code=None):
+    body = {'request_id': rid}
+    if code:
+        body['code'] = code
+    r, pend = release_poll(c, '/media/release', body, wait, no_wait, slack=1800)
+    if r is None:
+        print(pending_line('media request', rid, pend, f'vault media release {rid} [--wait S]'), file=sys.stderr)
+        sys.exit(EXIT_CODE_PENDING)
+    if r['status'] == 'facts':
+        print('the owner chose Facts only (no files):')
+        print(json.dumps(r['facts'], indent=1, ensure_ascii=False))
+        return 0
+    paths = media_save(c, r)
+    print(f"saved {len(paths)} file(s); deleted after {r['keep_minutes']} min by `vault media gc`:")
+    for p in paths:
+        print(f'  {p}')
+    return 0
+
+
+def parse_keep(v):
+    m = re.fullmatch(r'\s*(\d+)\s*(h|m|min)?\s*', str(v))
+    if not m:
+        die('--keep: e.g. 2h, 90m or 30', 2)
+    mins = int(m[1]) * (60 if m[2] == 'h' else 1)
+    if not 5 <= mins <= KEEP_MAX_MIN:
+        die(f'--keep must be 5 min .. {KEEP_MAX_MIN // 60} h (the owner\'s limit)', 2)
+    return mins
+
+
+def cmd_media(c, argv):
+    p = argparse.ArgumentParser(prog='vault media', description='files from the vault: list (metadata), request '
+                                '(the owner approves), facts (no approval)')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    ls = sp.add_parser('list')
+    ls.add_argument('source', choices=['tg', 'gmail', 'paperless'])
+    ls.add_argument('ref', help='tg: chat id/alias/name; gmail: REF; paperless: document id')
+    ls.add_argument('--type', choices=['pdf', 'photo', 'voice', 'video', 'audio', 'document'])
+    ls.add_argument('--since')
+    ls.add_argument('--grep')
+    ls.add_argument('-n', type=int)
+    ls.add_argument('--account')
+    ls.add_argument('--folder')
+    ls.add_argument('--json', action='store_true')
+    rq = sp.add_parser('request')
+    rq.add_argument('keys', nargs='*')
+    rq.add_argument('--pick', help='numbers from the last `vault media list`, e.g. 1,3')
+    rq.add_argument('--reason', required=True, help='shown to the owner')
+    rq.add_argument('--keep', default='2h', help='how long the files stay here (default and max 2h)')
+    rq.add_argument('--wait', type=int, default=100)
+    rq.add_argument('--no-wait', action='store_true')
+    rl = sp.add_parser('release')
+    rl.add_argument('request_id')
+    rl.add_argument('code', nargs='?')
+    rl.add_argument('--wait', type=int, default=100)
+    rl.add_argument('--no-wait', action='store_true')
+    for name in ('facts', 'extract'):
+        fx = sp.add_parser(name)
+        fx.add_argument('key', help='a media key or a number from the last list')
+        fx.add_argument('--kind', choices=['auto', 'travel', 'event', 'booking', 'ics', 'generic'], default='auto')
+    gc = sp.add_parser('gc')
+    gc.add_argument('--quiet', action='store_true')
+    sp.add_parser('status')
+    a = p.parse_args(argv)
+    if a.cmd != 'gc':
+        media_gc(c, quiet=True)
+    if a.cmd == 'list':
+        body = {'source': a.source, 'type': a.type, 'since': a.since, 'grep': a.grep, 'n': a.n,
+                'account': a.account, 'folder': a.folder}
+        if a.source == 'tg':
+            body['chat'] = a.ref
+        elif a.source == 'gmail':
+            body['ref'] = a.ref
+        else:
+            if not a.ref.isdigit():
+                die('paperless: give the document id', 2)
+            body['id'] = int(a.ref)
+        return media_list(c, body, a.json)
+    if a.cmd == 'request':
+        keys = list(a.keys) + (media_pick(a.pick) if a.pick else [])
+        keys = [media_pick(k)[0] if k.isdigit() else k for k in keys]
+        if not keys:
+            die('give media keys or --pick N,M (from `vault media list`)', 2)
+        r = c.call('POST', '/media/request', {'keys': keys, 'reason': a.reason, 'keep_minutes': parse_keep(a.keep)},
+                   timeout=1800)
+        print(f"asked the owner for {len(r['files'])} file(s): request {r['request_id']} (expires "
+              f"{(r.get('expires_at') or '?')[11:16]}; Facts only {'offered' if r.get('facts_offered') else 'not offered'})",
+              file=sys.stderr)
+        if a.no_wait:
+            print(r['request_id'])
+            return EXIT_CODE_PENDING
+        return media_release(c, r['request_id'], a.wait)
+    if a.cmd == 'release':
+        return media_release(c, a.request_id, a.wait, a.no_wait, a.code)
+    if a.cmd in ('facts', 'extract'):
+        key = media_pick(a.key)[0] if a.key.isdigit() else a.key
+        r = c.call('POST', '/media/extract', {'key': key, 'kind': a.kind}, timeout=1800)
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    if a.cmd == 'gc':
+        n = media_gc(c, quiet=a.quiet)
+        if not a.quiet:
+            print(f'{n} release(s) deleted now')
+        return 0
+    recs = media_records()
+    if not recs:
+        print('no released media files on this side')
+    for rid, rec in recs.items():
+        when = time.strftime('%d.%m. %H:%M', time.localtime(rec['deleted'] or rec['delete_by']))
+        print(f"{rid}: {len(rec['files'])} file(s), " + (f'deleted {when}' if rec.get('deleted') else f'delete by {when}')
+              + ('' if 'deleted' in rec.get('acked', []) or not rec.get('deleted') else ' (report to the vault pending)'))
+    return 0
+
+
+def cmd_facts(c, argv):
+    """Facts of a chat or a mail as JSON (anonymized in the vault, every value grounded in that text)."""
+    p = argparse.ArgumentParser(prog='vault facts', description='events, to-dos, places, decisions and open '
+                                'questions as JSON, from the anonymized text in the vault')
+    sp = p.add_subparsers(dest='src', required=True)
+    t = sp.add_parser('tg', help='one Telegram chat (id, alias or name; vault tg find-chat)')
+    t.add_argument('chat')
+    t.add_argument('--since', help='window, e.g. 60d (default), 12w, 2026-09-01')
+    t.add_argument('-n', type=int, help='at most N newest messages of the window (default 400, max 500)')
+    g = sp.add_parser('gmail', help='one mail (REF from search or events)')
+    g.add_argument('ref')
+    g.add_argument('--account')
+    g.add_argument('--folder')
+    g.add_argument('--chars', type=int)
+    for x in (t, g):
+        x.add_argument('--brief', action='store_true', help='one line per fact instead of JSON')
+    a = p.parse_args(argv)
+    if a.src == 'tg':
+        body = {'chat': a.chat}
+        if a.since:
+            body['since'] = a.since
+        if a.n:
+            body['n'] = a.n
+        res = c.call('POST', '/tg/facts', body, timeout=LONG)
+    else:
+        body = {'uid': a.ref}
+        for k in ('account', 'folder', 'chars'):
+            if getattr(a, k):
+                body[k] = getattr(a, k)
+        res = c.call('POST', '/gmail/facts', body, timeout=LONG)
+    if not a.brief:
+        print(json.dumps(res, indent=1, ensure_ascii=False))
+        return 0
+    print(f"Facts: {res.get('chat') or res.get('ref')} ({res.get('messages', 1)} message(s), {res.get('parts')} "
+          f"part(s), {res.get('dropped', 0)} value(s) dropped)")
+    for kind in ('events', 'todos', 'places', 'decisions', 'questions'):
+        for x in res.get(kind) or []:
+            when = ' '.join(v for v in (x.get('date') or x.get('date_text') or x.get('due') or x.get('due_text'),
+                                        x.get('start') or x.get('start_text')) if v)
+            where = ', '.join(v for v in (x.get('venue'), x.get('address')) if v)
+            print(f"- {kind[:-1]}: " + ' · '.join(v for v in (when, x.get('what') or x.get('name'), where,
+                                                              ', '.join(x['who']) if isinstance(x.get('who'), list)
+                                                              else x.get('who')) if v)
+                  + (f"  [{' '.join(x.get('refs') or [])}]" if x.get('refs') else ''))
+    return 0
+
+
+def fmt_find(r):
+    n = f"{r.get('rank', '?'):>2}."
+    if r.get('source') == 'tg':
+        return (f"{n} tg    {(r.get('date') or '')[:16].replace('T', ' ')} · {r.get('chat')} "
+                f"[chat {r.get('chat_key')} {r.get('ref')}]" + (f"\n      {r['text']}" if r.get('text') else ''))
+    if r.get('source') == 'gmail':
+        return (f"{n} mail  {(r.get('date') or '')[:10]} · {r.get('from')} [{r.get('ref')}]"
+                + (f"\n      {r.get('subject') or ''} — {r.get('snippet') or ''}" if r.get('subject') or r.get('snippet')
+                   else ''))
+    meta = '; '.join(v for v in (r.get('document_type'), r.get('correspondent')) if v)
+    return f"{n} doc   {r.get('date') or ''} · {r.get('title')}" + (f" ({meta})" if meta else '') + \
+        f" [paperless {r.get('id')}]"
+
+
+def cmd_find(c, argv):
+    """One ranked list across Telegram, Gmail and paperless, with word variants."""
+    p = argparse.ArgumentParser(prog='vault find', description='search Telegram, Gmail and paperless at once, with '
+                                'Swiss German / German / English variants')
+    p.add_argument('query')
+    p.add_argument('--since', help='window, e.g. 30d (default), 12w, 2026-09-01 (paperless: all dates)')
+    p.add_argument('--sources', help='comma list of tg,gmail,paperless (default: all)')
+    p.add_argument('-n', type=int, help='results (default 15, max 50)')
+    p.add_argument('--json', action='store_true')
+    text_opts(p)
+    a = p.parse_args(argv)
+    body = {'q': a.query, **text_body(a)}
+    if a.since:
+        body['since'] = a.since
+    if a.sources:
+        body['sources'] = [s.strip() for s in a.sources.split(',') if s.strip()]
+    if a.n:
+        body['n'] = a.n
+    res = c.call('POST', '/find', body, timeout=LONG)
+    if res.get('text_release') and res.get('request_id'):
+        raw_requested(res)
+    if a.json:
+        print(json.dumps(res, indent=1, ensure_ascii=False))
+        return 0
+    v = ', '.join('/'.join(g[:4]) for g in res.get('variants') or [])
+    print(f"Find {res.get('query')!r} since {res.get('since')} in {','.join(res.get('sources') or [])}: "
+          f"{res.get('count')} result(s), ranked (variants: {v})")
+    for r in res.get('results') or []:
+        print(fmt_find(r))
+    for k, e in (res.get('errors') or {}).items():
+        print(f'vault find: {k} failed: {e}', file=sys.stderr)
+    return 0
+
+
+def plan_line(x):
+    try:
+        day = dt.date.fromisoformat(x['date']).strftime('%a %d.%m')
+    except (KeyError, ValueError):
+        day = x.get('date') or '?'
+    what = (x.get('what') or '?') + (f", {x['venue']}" if x.get('venue') else '')
+    return (f"{day}{' ' + x['start'] if x.get('start') else ''} {'due: ' if x.get('kind') == 'todo' else ''}{what}"
+            f" · {x.get('chat') or '?'}" + (f" ({x['mentions']}x)" if x.get('mentions') else ''))
+
+
+def cmd_plans(c, argv):
+    """Dated facts of the event feed (calendar suggestions)."""
+    p = argparse.ArgumentParser(prog='vault plans', description='dated plans from the event feed')
+    p.add_argument('--days', type=int, default=14)
+    p.add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    res = c.call('GET', f'/plans?days={a.days}', timeout=60)
+    if a.json:
+        print(json.dumps(res, indent=1, ensure_ascii=False))
+        return 0
+    if not res.get('plans'):
+        print(f"no dated plans in the event feed for {res.get('from')} .. {res.get('to')}")
+    for x in res.get('plans') or []:
+        print(plan_line(x) + f"  [{x.get('source')} {x.get('chat_key')} {x.get('ref') or ''}]".rstrip())
+    return 0
+
+
+def cmd_audit(c, argv):
+    p = argparse.ArgumentParser(prog='vault audit')
+    p.add_argument('--days', type=float, default=7)
+    p.add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    ev = c.call('GET', f'/audit?days={a.days}')['events']
+    if a.json:
+        print(json.dumps(ev, indent=1, ensure_ascii=False))
+        return 0
+    for e in ev:
+        rest = ' '.join(f'{k}={json.dumps(v, ensure_ascii=False)}' for k, v in e.items() if k not in ('ts', 'event'))
+        print(f"{e['ts'][:19]}  {e['event']:<20} {rest}")
+    if not ev:
+        print(f'no vault events in the last {a.days:g} day(s)')
+    return 0
+
+
+def vault_reachable(c):
+    try:
+        with OPENER.open(c.url + '/health', timeout=10):
+            return True
+    except OSError:
+        return False
+
+
+def cmd_alerts(c, argv):
+    p = argparse.ArgumentParser(prog='vault alerts')
+    p.add_argument('--to-inbox', action='store_true', help='copy alerts to ~/inbox as notes and acknowledge them')
+    p.add_argument('--cron', action='store_true', help='with --to-inbox: also ONE note after 3 unreachable checks')
+    a = p.parse_args(argv)
+    if a.cron:
+        flag = os.path.join(HOME, '.local', 'state', 'vault', 'unreachable')
+        os.makedirs(os.path.dirname(flag), exist_ok=True)
+        if not vault_reachable(c):
+            n = int(read_file(flag) or 0) + 1
+            with open(flag, 'w') as f:
+                f.write(str(n))
+            if n == 3:
+                with open(os.path.join(HOME, 'inbox', f'vault-unreachable-{int(time.time())}.md'), 'w') as f:
+                    f.write(f'# claude-vault unreachable\n\n{c.url}/health failed 3 checks in a row (~45 min). '
+                            'Check `vault admin ps` / `vault admin logs`; restart with `vault admin restart`.\n'
+                            '(from `vault alerts --to-inbox --cron`, no more notes until it is back)\n')
+            return 3
+        if os.path.exists(flag):
+            os.remove(flag)
+    al = c.call('GET', '/alerts', timeout=60)['alerts']
+    if a.to_inbox:
+        names = []
+        for x in al:
+            path = os.path.join(HOME, 'inbox', 'vault-alert-' + re.sub(r'[^\w.-]', '_', x['name']))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(x['text'] + '\n(copied from the privacy vault by `vault alerts --to-inbox`)\n')
+            names.append(x['name'])
+        if names:
+            c.call('POST', '/alerts/ack', {'names': names})
+        return 0
+    for x in al:
+        print(f"== {x['name']}\n{x['text']}")
+    if not al:
+        print('no alerts')
+    return 0
+
+
+def cmd_metrics(c, argv):
+    """Health numbers: per route calls/errors/timeouts/callers gone/p50/p95/max, the LLM's busy share,
+    waits per class, queue, tokens processed vs reused, speeds, cache hit rates, source delays. Numbers only."""
+    p = argparse.ArgumentParser(prog='vault metrics')
+    p.add_argument('--days', type=float, default=1, help='window in days (default 1, max 30)')
+    p.add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    m = c.call('GET', f'/metrics?days={a.days}', timeout=30)
+    if a.json:
+        print(json.dumps(m, indent=1, ensure_ascii=False))
+        return 0
+    def s_(v):
+        return '-' if v is None else f'{v:.1f}s' if v < 10 else f'{v:.0f}s' if v < 90 else f'{v / 60:.1f}m'
+    print(f"last {a.days:g} day(s), {m['hours']} hour(s) with data")
+    print(f"{'route':28} {'calls':>6} {'err':>4} {'t/o':>4} {'gone':>4} {'p50':>7} {'p95':>7} {'max':>7}")
+    for r in m['routes'][:40]:
+        print(f"{r['route'][:28]:28} {r['calls']:>6} {r['errors']:>4} {r['timeouts']:>4} {r['gone']:>4} "
+              f"{s_(r['p50_s']):>7} {s_(r['p95_s']):>7} {s_(r['max_s']):>7}")
+    l = m['llm']
+    print(f"LLM: {round(100 * l['busy_share'])}% busy, {l['jobs']} jobs, longest queue {l['queue_max']}, "
+          f"{l['dropped']} dropped / {l['stopped']} stopped (caller gone), now waiting {l['queue_now']}")
+    for cls, w in l['wait'].items():
+        print(f"  wait {cls:10} n={w['n']:<5} p50 {s_(w['p50_s'])}  p95 {s_(w['p95_s'])}  max {s_(w['max_s'])}")
+    if l['runs']:
+        print(f"  llm-local: {l['runs']} runs, prompt tokens {l['prompt_tokens_processed']} processed / "
+              f"{l['prompt_tokens_reused']} reused"
+              + (f" ({round(100 * l['reused_share'])}% reused)" if l['reused_share'] is not None else '')
+              + f", {l['gen_tokens']} generated; prompt {l['prompt_tps'] or '-'} tok/s, generation "
+              f"{l['gen_tps'] or '-'} tok/s")
+    for name, cst in m['cache'].items():
+        print(f"cache {name}: {cst['hits']} hits / {cst['misses']} misses"
+              + (f" ({round(100 * cst['hit_rate'])}%)" if cst['hit_rate'] is not None else ''))
+    for src, d in m['delay'].items():
+        print(f"delay {src}: n={d['n']} p50 {s_(d['p50_s'])} p95 {s_(d['p95_s'])}")
+    return 0
+
+
+def cmd_status(c, argv):
+    p = argparse.ArgumentParser(prog='vault status')
+    p.add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    s = c.call('GET', '/status', timeout=30)
+    if a.json:
+        print(json.dumps(s, indent=1, ensure_ascii=False))
+        return 0
+    v, l, t = s['vault'], s['llm'], s['tg']
+    last = (t['sync'].get('last') or {})
+    print(f"vault {v['version']} up {v['uptime_seconds'] // 3600}h{(v['uptime_seconds'] % 3600) // 60:02d}m · policy "
+          f"{v['policy']}" + (' · TEST MODE' if v['test_mode'] else ''))
+    print(f"secrets: " + ', '.join(f"{k} {'set' if on else 'missing'}" for k, on in s['secrets'].items()))
+    print(f"local LLM: {l['state']}{' (healthy)' if l['healthy'] else ''}"
+          + (f", busy with {l['busy_with']}" if l.get('busy_with') else '') + (f" · {l['detail']}" if l.get('detail') else '')
+          + (f", {l['waiting']} waiting" if l.get('waiting') else '') + (f" · vision {l['vision']}" if l.get('vision') else ''))
+    if s.get('metrics'):
+        print(f"metrics: {s['metrics']}  (vault metrics)")
+    q = l.get('queue') or {}
+    if q.get('running') or q.get('queue'):
+        r = q.get('running') or {}
+        print(f"LLM queue: running {r.get('what', '-')} ({r.get('class', '-')}, {r.get('elapsed_s', 0)} s"
+              + (f", ETA ~{r['eta_s']} s" if r.get('eta_s') is not None else '') + ')'
+              + ''.join(f"; queued {x['what']} ({x['class']}, waited {x['waited_s']} s)" for x in q.get('queue') or []))
+    print(f"telegram: credentials {'set' if t['credentials'] else 'missing'}, "
+          f"{'logged in' if t['logged_in'] else 'not logged in'} (login job: {t['login']}), bot chat "
+          f"{'excluded' if t['bot_chat_excluded'] else 'NOT excludable yet (no bot secret): no sync'}")
+    if t['logged_in']:
+        print(f"  sync every {t['sync']['every_minutes']} min{' (running now)' if t['sync']['running'] else ''}; "
+              f"last: {last.get('at', 'never')} exit {last.get('exit_code')} {last.get('summary') or last.get('error') or ''}")
+    print(f"paperless: {'configured' if s['paperless']['configured'] else 'not configured'} · firefly: "
+          f"{'configured' if s['firefly']['configured'] else 'not configured (token pending)'}")
+    gm = s.get('gmail')
+    if gm:
+        accs = gm.get('accounts') or []
+        print(f"gmail: {'configured' if gm['configured'] else 'not configured (vault-console secret gmail)'}"
+              + (f", watcher {gm['watcher']}, last poll {(gm.get('last_poll') or '')[11:16] or 'never'}"
+                 if gm['configured'] else '') + (f" · error: {gm['error']}" if gm.get('error') else ''))
+        if len(accs) > 1:                              # several accounts: one line each (labels only)
+            print('  accounts: ' + ' · '.join(f"{x['account']} {x['watcher']}, last poll "
+                                              f"{(x.get('last_poll') or '')[11:16] or 'never'}"
+                                              + (' (error)' if x.get('error') else '') for x in accs))
+    print(f"raw requests pending: {s['raw']['pending']} · alerts: {s['alerts']}")
+    ap = s['raw'].get('approval') or {}
+    if ap:
+        print(f"raw approval: {'✅/❌ buttons' if ap.get('mode') == 'buttons' else 'fallback code'} (vault bot: "
+              f"{ap.get('bot')}" + (f", last poll {ap['last_poll'][11:19]}" if ap.get('last_poll') else '') + ')'
+              + (f"\n  {ap['detail']}" if ap.get('detail') else ''))
+    lv = t.get('live') or {}
+    if lv:
+        print(f"telegram live listener: {lv.get('state')}" + (f" since {lv['since'][11:16]}" if lv.get('since') else '')
+              + (f" ({lv['detail']})" if lv.get('detail') else '')
+              + f", {lv.get('queued_since_start', 0)} queued, {lv.get('restarts', 0)} restart(s)")
+    ev = s.get('events')
+    if ev:
+        print(f"event feed: cursor {ev.get('head')}, sources {', '.join(ev.get('sources') or [])}, "
+              f"{ev.get('rules', 0)} rule(s)" + (f" · last error: {ev['error']}" if ev.get('error') else ''))
+    bd = s.get('board')
+    if bd:
+        print(f"pinned status (vault bot chat): {bd.get('state')}"
+              + (f", last edit {bd['last_edit'][11:16]}" if bd.get('last_edit') else '')
+              + f", {bd.get('edits_today', 0)} write(s) today" + (f" ({bd['detail']})" if bd.get('detail') else ''))
+    return 0
+
+
+def fmt_event(e):
+    t = (e.get('ts') or '')[5:16].replace('T', ' ')
+    if e.get('label') == 'collapsed':
+        return f"#{e['cursor']} {t} {e['source']} · {e.get('chat')}: {e.get('count')} message(s) only counted ({e.get('why')})"
+    flag = '❗' if e.get('actionable') else ('★' if e.get('priority') else '·')
+    if e.get('source') == 'homeassistant':          # the HA status feed: coarse flags only
+        h = e.get('ha') if isinstance(e.get('ha'), dict) else {}
+        what = ', '.join(f'{k}={h[k]}' for k in ('place', 'zone', 'band', 'town', 'state', 'minutes', 'value',
+                                                   'connected', 'asleep', 'next', 'low', 'level', 'collapsed')
+                         if h.get(k) not in (None, '', []))
+        return f"#{e['cursor']} {t} {flag} homeassistant · {e.get('label')} · {what}"
+    w = e.get('who') or e.get('sender')
+    who = f" · {w}" if w and w != e.get('chat') else ''
+    src = e['source'] + (f" {e['account']}" if e.get('account') else '')     # gmail: the account's label
+    want = (f" → {e['wants']}" if e.get('wants') else '') + (f" ({e['urgency']})" if e.get('urgency') not in
+                                                                (None, 'none') else '')
+    att = e.get('att') or {}
+    atts = f" · {att['pdf']} PDF" if att.get('pdf') else (f" · {att['n']} file(s)" if att.get('n') else '')
+    return f"#{e['cursor']} {t} {flag} {src} · {e.get('chat')}{who} · {e.get('label')}{want}{atts}"   # never text
+
+
+def cmd_events(c, argv, source=None):
+    """The vault's live event feed: new incoming messages and mails, triaged and anonymized."""
+    if argv[:1] == ['rules']:
+        print(json.dumps(c.call('GET', '/events/rules')['rules'], indent=1, ensure_ascii=False))
+        return 0
+    if argv[:1] and argv[0] in ('mute', 'priority', 'normal'):
+        p = argparse.ArgumentParser(prog=f'vault events {argv[0]}')
+        p.add_argument('--source', default=source or 'telegram', choices=['telegram', 'gmail'])
+        g = p.add_mutually_exclusive_group(required=True)
+        g.add_argument('--chat', help="the chat's key (Telegram: chat id, as in the events' chat_key; gmail: a "
+                                      "domain, which covers its subdomains)")
+        g.add_argument('--sender', help="the sender's key (Telegram: user id; gmail: the address or the events' "
+                                        "sender_key)")
+        a = p.parse_args(argv[1:])
+        r = c.call('POST', '/events/rules', {'source': a.source, 'mode': argv[0], 'chat': a.chat, 'sender': a.sender})
+        print(f"{a.source} {'chat ' + a.chat if a.chat else 'sender ' + a.sender}: {argv[0]} "
+              f"({len(r['rules'])} rule(s) in total)")
+        return 0
+    p = argparse.ArgumentParser(prog='vault events', description='new incoming messages, triaged + anonymized in the '
+                                'vault (❗ actionable, ★ priority rule, · chatter; text only for ❗/★)')
+    p.add_argument('--since', default='latest', help='cursor from the last call (default "latest": only the cursor)')
+    p.add_argument('--max', type=int, default=100)
+    p.add_argument('--source', choices=['telegram', 'gmail', 'paperless', 'homeassistant'], default=source)
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--retriage', action='store_true', help='first re-triage the Gmail events after --since N (max '
+                   '20, one local-LLM call), then list them; `vault-events --show --since N` shows the note')
+    a = p.parse_args(argv)
+    if a.retriage:
+        if not a.since.isdigit():
+            die('--retriage needs --since N (a cursor number)', 2)
+        rt = c.call('POST', '/events/retriage', {'since': int(a.since), 'max': min(max(a.max, 1), 20)}, timeout=1800)
+        print(f"re-triaged {rt['retriaged']} Gmail event(s) ({rt['changed']} changed, {rt['missing']} no longer in "
+              f"the mailbox)" + (' (more: call again with a later --since)' if rt.get('more') else ''),
+              file=sys.stderr)
+        a.source = a.source or 'gmail'
+    q = urllib.parse.urlencode({k: v for k, v in (('since', a.since), ('max', a.max), ('source', a.source)) if v})
+    r = c.call('GET', f'/events?{q}', timeout=60)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    for e in r['events']:
+        print(fmt_event(e))
+    print(f"next cursor: {r['next_cursor']}" + (' (more: call again with it)' if r.get('more') else '')
+          + (' (the feed was reset)' if r.get('reset') else ''))
+    return 0
+
+
+def _hm(ts):
+    return (ts or '')[5:16].replace('T', ' ') or '?'
+
+
+def _atts(atts):
+    return '; '.join(f"{a['index']}. {a['name']} ({a['type']}, {a['size']} B)" for a in atts or [])
+
+
+MI_CATEGORIES = 'contract,insurance,tax,payslip,bill,statement,official,receipt,other,unsure'
+
+
+def _mi_print(r):
+    """The mail-import summary: aggregates only (the vault sends nothing else)."""
+    accs = ', '.join(f"{k} ({'All Mail' if v.get('all_mail') else 'INBOX + folders'}: {v.get('scanned', 0)} of "
+                     f"{v.get('mails_with_attachments', 0)} mails with attachments read)"
+                     for k, v in (r.get('accounts') or {}).items()) or '-'
+    t, ck, llm = r.get('totals') or {}, r.get('checksum') or {}, r.get('llm') or {}
+    print(f"plan {r['plan']} · {r['status']}" + (f" ({r['phase']})" if r['status'] != 'done' else '')
+          + (f" · error {r['error']}" if r.get('error') else '') + f" · {r.get('created', '')[:16]}")
+    print(f"accounts: {accs}")
+    print(f"{t.get('mails', 0)} mails, {t.get('attachments', 0)} documents ({t.get('pdf', 0)} PDF, "
+          f"{t.get('office', 0)} office) · checksums: {ck.get('method') or '-'}, {ck.get('checked', 0)}/"
+          f"{ck.get('important', 0)} · model: {llm.get('calls', 0)} calls, {llm.get('items', 0)} items")
+    cats = r.get('categories') or {}
+    if cats:
+        print(f"{'category':10} {'docs':>5} {'mails':>5} {'new':>5} {'exact':>5} {'likely':>6} {'repeat':>6} "
+              f"{'office':>6} {'min':>5}  years · top senders")
+        for c, v in cats.items():
+            d = v['duplicates']
+            yrs = ' '.join(f'{y}:{n}' for y, n in v['years'].items())
+            top = ', '.join(f'{k} {n}' for k, n in v['top_senders'][:5])
+            print(f"{c:10} {v['attachments']:>5} {v['mails']:>5} {v['new']:>5} {d['exact']:>5} {d['likely']:>6} "
+                  f"{d['repeat']:>6} {v['office_docs']:>6} {v['import_min']:>5}  {yrs} · {top}")
+    e = r.get('estimate') or {}
+    if e:
+        print(f"import estimate (new PDFs of all categories but other): ~{e.get('all_important_min', 0)} min "
+              f"({e.get('per_doc_s')} s per document incl. a {e.get('pause_s')} s pause), Gmail download budget: "
+              f"{e.get('gmail_days', 0)} day(s)")
+    ty = r.get('document_types') or {}
+    if ty and 'error' not in ty:
+        print('types: ' + ', '.join(f"{c} -> {v['name']}{'' if v['exists'] else ' (new)'}" for c, v in ty.items()))
+    if r.get('correspondent_matches'):
+        print('existing correspondent found: ' + ', '.join(f'{c} {n}' for c, n in r['correspondent_matches'].items()))
+    for x in r.get('runs') or []:
+        print(f"run {x['run']}: {x['status']} · {','.join(x.get('categories') or [])}"
+              + (f" (limit {x['limit']})" if x.get('limit') else '') + ' · '
+              + (', '.join(f'{k} {n}' for k, n in (x.get('counts') or {}).items()) or 'nothing yet')
+              + (f" · {x['error']}" if x.get('error') else ''))
+    others = [p for p in r.get('plans') or [] if p['id'] != r['plan']]
+    if others:
+        print('other plans: ' + ', '.join(f"{p['id']} ({p['status']}, {p['created'][:10]})" for p in others[:5]))
+
+
+def cmd_gmail_import(c, argv):
+    """vault gmail import …: the mail backfill into paperless (app/mailimport.py in the vault)."""
+    verbs = ('scan', 'status', 'cancel', 'drop')
+    if argv[:1] and argv[0] in verbs:
+        verb, rest = argv[0], argv[1:]
+    else:
+        verb, rest = 'run', argv
+    p = argparse.ArgumentParser(prog=f"vault gmail import{'' if verb == 'run' else ' ' + verb}",
+                                description='mail backfill into paperless, inside the vault (aggregates only)')
+    if verb == 'scan':
+        p.add_argument('--account', action='append', help='account label (repeatable; default: all)')
+        p.add_argument('--since', help='YYYY-MM-DD: only mails from that day on (default: all years)')
+        p.add_argument('--max', type=int, help='at most N mails with attachments per account (newest)')
+        p.add_argument('--no-download', action='store_true', help='no attachment bytes: duplicates by name + date')
+        p.add_argument('--no-llm', action='store_true', help='cheap rules only (the rest: unsure)')
+        p.add_argument('--resume', metavar='ID', help='continue a failed or cancelled scan')
+        p.add_argument('--json', action='store_true')
+    elif verb == 'status':
+        p.add_argument('plan', nargs='?')
+        p.add_argument('--json', action='store_true')
+    elif verb == 'cancel':
+        p.add_argument('plan', nargs='?')
+    elif verb == 'drop':
+        p.add_argument('plan')
+    else:
+        p.add_argument('--plan', required=True)
+        p.add_argument('--categories', required=True, help=MI_CATEGORIES)
+        p.add_argument('--limit', type=int, help='at most N documents in this run')
+        p.add_argument('--office', action='store_true', help='office documents too (paperless needs Tika for them)')
+        p.add_argument('--likely', action='store_true', help='also rows that look like a document already there '
+                       '(same name and date; the exact checksum check still runs)')
+        p.add_argument('--pause', type=float, help='seconds between two uploads (default 15)')
+        p.add_argument('--dry-run', action='store_true', help='only count what would be imported')
+        p.add_argument('--json', action='store_true')
+    a = p.parse_args(rest)
+    if verb == 'scan':
+        body = {}
+        if a.resume:
+            body['resume'] = a.resume
+        else:
+            if a.account:
+                body['accounts'] = a.account
+            for k in ('since', 'max'):
+                if getattr(a, k) is not None:
+                    body[k] = getattr(a, k)
+            if a.no_download:
+                body['download'] = False
+            if a.no_llm:
+                body['llm'] = False
+        r = c.call('POST', '/gmail/import/scan', body)
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+        else:
+            print(f"plan {r['plan']}: {r['status']}" + (' (resumed)' if r.get('resumed') else '')
+                  + f" · progress: vault gmail import status {r['plan']}")
+        return 0
+    if verb == 'status':
+        r = c.call('GET', '/gmail/import' + (f'?plan={urllib.parse.quote(a.plan)}' if a.plan else ''))
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+        elif not r.get('plan'):
+            print(r.get('note') or 'no plan yet')
+        else:
+            _mi_print(r)
+        return 0
+    if verb == 'cancel':
+        r = c.call('POST', '/gmail/import/cancel', {'plan': a.plan} if a.plan else {})
+        print('cancelled: ' + (', '.join(r['cancelled']) or 'nothing was running'))
+        return 0
+    if verb == 'drop':
+        r = c.call('POST', '/gmail/import/drop', {'plan': a.plan})
+        print(f"plan {r['dropped']} removed from the vault ({r['rows']} rows)")
+        return 0
+    body = {'plan': a.plan, 'categories': [x.strip() for x in a.categories.split(',') if x.strip()]}
+    for k in ('limit', 'pause'):
+        if getattr(a, k) is not None:
+            body[k] = getattr(a, k)
+    for k in ('office', 'likely'):
+        if getattr(a, k):
+            body[k] = True
+    if a.dry_run:
+        body['dry'] = True
+    r = c.call('POST', '/gmail/import/run', body)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    per = ', '.join(f'{k} {n}' for k, n in (r.get('per_category') or {}).items()) or 'none'
+    head = 'dry run' if r.get('dry') else f"run {r['run']} {r['status']}"
+    print(f"{head}: {r['to_import']} documents ({per}) · ~{r['estimate_min']} min · Gmail download budget "
+          f"{r['gmail_days']} day(s)" + ('' if r.get('dry') else f" · vault gmail import status {r['plan']}"))
+    return 0
+
+
+def cmd_gmail(c, argv):
+    """Read-only Gmail in the vault: status, search, get (anonymized), attachments into paperless."""
+    if argv[:1] == ['import']:
+        return cmd_gmail_import(c, argv[1:])
+    p = argparse.ArgumentParser(prog='vault gmail', description='read-only Gmail through the privacy vault')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    x = sp.add_parser('status')
+    x.add_argument('--json', action='store_true')
+    x = sp.add_parser('search', help="Gmail search syntax, e.g. 'from:swisscom has:attachment newer_than:30d'")
+    x.add_argument('query', nargs='+')
+    x.add_argument('-n', type=int, default=10)
+    x.add_argument('--folder', default='INBOX')
+    x.add_argument('--account', help='one account label (default: all accounts)')
+    x.add_argument('--json', action='store_true')
+    x.add_argument('--triage', action='store_true', help='category for mails the feed has not triaged ("?"): one '
+                   'local-LLM call for the page (slower)')
+    x.add_argument('--timing', action='store_true', help='per account: IMAP stage times (stderr)')
+    text_opts(x)
+    x = sp.add_parser('get', help='a quick card (the triage); --deep: the full card with dates (slower)')
+    x.add_argument('ref', help='main:1234 or work:1234@Folder (from vault events / vault gmail search)')
+    x.add_argument('--folder')
+    x.add_argument('--account', help="the account label, when the REF doesn't carry it")
+    x.add_argument('--chars', type=int, default=4000)
+    x.add_argument('--json', action='store_true')
+    x.add_argument('--deep', action='store_true', help='the full card: reads the mail (deadline, appointment; slower)')
+    text_opts(x)
+    x = sp.add_parser('to-paperless', help='file an attachment (PDF/image) into paperless; stays in his systems')
+    x.add_argument('ref')
+    x.add_argument('attachment', type=int, nargs='?', default=1)
+    x.add_argument('--folder')
+    x.add_argument('--account', help="the account label, when the REF doesn't carry it")
+    x.add_argument('--title')
+    x.add_argument('--created', help='YYYY-MM-DD')
+    x.add_argument('--correspondent')
+    x.add_argument('--type', dest='document_type')
+    x.add_argument('--tag', action='append', dest='tags')
+    x.add_argument('--create', action='store_true', help='create unknown tags/types/correspondents')
+    x.add_argument('--no-wait', action='store_true', help="don't wait for paperless to consume it")
+    x = sp.add_parser('config', help="extra folders/labels to watch (INBOX always) and the owner's name")
+    x.add_argument('--account', help='the account label (several accounts: required to change one)')
+    x.add_argument('--folders', help='comma-separated, e.g. "Rechnungen,[Gmail]/Important"')
+    x.add_argument('--owner-name')
+    a = p.parse_args(argv)
+    if a.cmd == 'status':
+        r = c.call('GET', '/gmail/status')
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+            return 0
+        if not r['configured']:
+            print('gmail: not configured. The owner runs at the Unraid terminal: docker exec -it claude-vault '
+                  'vault-console secret gmail  (address + a Google app password)')
+            return 0
+        accs = r.get('accounts') or []
+        print(f"gmail: {len(accs)} account{'' if len(accs) == 1 else 's'} (read-only), IDLE renewed every "
+              f"{r.get('idle_renew_minutes')} min + a poll every {r.get('poll_every_minutes')} min")
+        for x in accs:
+            w, pl = x['watcher'], x['poll']
+            print(f"[{x['account']}] …@{x.get('domain') or '?'}, folders: {', '.join(x['folders'])}")
+            print(f"  watcher: {w['state']}" + (f" since {_hm(w.get('since'))}" if w.get('since') else '')
+                  + (f" ({w['detail']})" if w.get('detail') else '') + f", {w['reconnects']} reconnect(s)"
+                  + (f", last new mail {_hm(w['last_new_mail'])}" if w.get('last_new_mail') else ''))
+            print(f"  poll: last ok {_hm(pl['last_ok_at']) if pl.get('last_ok_at') else 'never'}, {pl['processed']} "
+                  f"mail(s) since start"
+                  + (f" · error: {pl['error']}" if pl.get('error') else ''))
+            print('  positions: ' + ', '.join(f'{k} {v}' for k, v in x['positions'].items()))
+        return 0
+    if a.cmd == 'search':
+        body = {'q': ' '.join(a.query), 'n': a.n, 'folder': a.folder}
+        if a.account:
+            body['account'] = a.account
+        if a.triage:
+            body['triage'] = True
+        body.update(text_body(a))
+        r = c.call('POST', '/gmail/search', body, timeout=1800)
+        if r.get('text_release') and r.get('request_id'):
+            raw_requested(r)
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+            return 0
+        for m in r['results']:
+            na = m['attachments'].get('n') if isinstance(m['attachments'], dict) else len(m['attachments'] or [])
+            att = f"  [{na} attachment(s)]" if na else ''
+            print(f"#{m['ref']}  {_hm(m['date'])}  {m['from']} · {m.get('subject') or m.get('category')}{att}")
+            if m.get('snippet'):
+                print(f"      {m['snippet']}")
+        accs = r.get('accounts') or []
+        print(f"{r['count']} shown of {r['total']} match(es) in {r['folder']}"
+              + (f" (account{'' if len(accs) == 1 else 's'} {', '.join(accs)})" if accs else ''))
+        for lab, err in (r.get('errors') or {}).items():
+            print(f"account {lab}: not searched: {err}", file=sys.stderr)
+        for lab, t in (r.get('timing') or {}).items() if a.timing else ():
+            st = ', '.join(f'{k} {t[k]}' for k in ('connect', 'open', 'search', 'fetch') if k in t)
+            print(f"timing {lab}: {t.get('total')} s ({st}; {t.get('hits', '?')} hits, {t.get('fetched', '?')} "
+                  f"fetched)", file=sys.stderr)
+        if any(m.get('category') == '?' for m in r['results']):
+            print('? = not triaged yet (not in the live feed); --triage asks the local LLM (one call)')
+        return 0
+    if a.cmd == 'get':
+        body = {'uid': a.ref, 'chars': a.chars}
+        for k in ('folder', 'account'):
+            if getattr(a, k):
+                body[k] = getattr(a, k)
+        if a.deep:
+            body['deep'] = True
+        body.update(text_body(a))
+        r = c.call('POST', '/gmail/get', body, timeout=1800)
+        if r.get('text_release') and r.get('request_id'):
+            raw_requested(r)
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+            return 0
+        if r.get('kind') == 'mail_card':
+            print(fmt_card(r))
+            return 0
+        print(f"mail #{r['ref']} · {_hm(r['date'])} · from {r['from']}\nSubject: {r['subject']}")
+        if r['attachments']:
+            print('Attachments: ' + _atts(r['attachments']))
+        print('\n' + r['text'] + ('\n[... cut: --chars N for more]' if r.get('text_truncated') else ''))
+        return 0
+    if a.cmd == 'to-paperless':
+        body = {'uid': a.ref, 'attachment': a.attachment}
+        for k in ('folder', 'account', 'title', 'created', 'correspondent', 'document_type', 'tags'):
+            if getattr(a, k):
+                body[k] = getattr(a, k)
+        if a.create:
+            body['create'] = True
+        if a.no_wait:
+            body['wait'] = False
+        r = c.call('POST', '/gmail/to-paperless', body, timeout=1800)
+        pl = r.get('paperless') or {}
+        print(f"mail #{r['ref']} attachment {r['attachment']} ({r['type']}, {r['bytes']} B) -> paperless: "
+              + (f"document {pl['document_id']} {pl.get('url') or ''}" if pl.get('document_id')
+                 else f"task {pl.get('task_id')} {pl.get('status') or 'queued'}"))
+        return 0
+    body = {}
+    if a.folders is not None:
+        body['folders'] = [f.strip() for f in a.folders.split(',') if f.strip()]
+    if a.owner_name is not None:
+        body['owner_name'] = a.owner_name
+    if body and a.account:
+        body['account'] = a.account
+    r = (c.call('POST', '/gmail/config', body) if body else
+         c.call('GET', '/gmail/config' + (f'?account={urllib.parse.quote(a.account)}' if a.account else '')))
+    print(json.dumps(r, indent=1, ensure_ascii=False))
+    return 0
+
+
+def cmd_firefly(c, argv):
+    p = argparse.ArgumentParser(prog='vault firefly')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    sp.add_parser('status')
+    sp.add_parser('sync-status')                       # the owner's bank-export sync: counts only (read-only)
+    sp.add_parser('check')                             # read-only dry run against Firefly: numbers only
+    sp.add_parser('rules')                             # the private sync rules: set?, sha256, entries per key
+    rs = sp.add_parser('rules-set', help='the rules JSON on stdin (never printed); set once, then --request-id/--code')
+    rs.add_argument('--request-id')
+    rs.add_argument('--code')
+    rr = sp.add_parser('rules-replace', help='ask the owner for a code to replace the stored rules')
+    rr.add_argument('--reason', required=True)
+    for name in ('summary', 'merchants'):
+        x = sp.add_parser(name)
+        x.add_argument('start')
+        x.add_argument('end')
+        if name == 'merchants':
+            x.add_argument('--limit', type=int, default=30)
+    a = p.parse_args(argv)
+    if a.cmd == 'status':
+        r = c.call('GET', '/firefly/status')
+    elif a.cmd == 'sync-status':
+        r = c.call('GET', '/finance/status')
+    elif a.cmd == 'check':
+        r = c.call('POST', '/finance/check', {}, timeout=960, ok_codes=(409,))
+    elif a.cmd == 'rules':
+        r = c.call('GET', '/finance/rules')
+    elif a.cmd == 'rules-replace':
+        r = c.call('POST', '/raw/request', {'source': 'finance-rules', 'reason': a.reason, 'query': {}})
+        raw_requested(r, f"vault firefly rules-set --request-id {r['request_id']} < firefly_rules.json")
+        return 0
+    elif a.cmd == 'rules-set':
+        return firefly_rules_set(c, a)
+    elif a.cmd == 'summary':
+        r = c.call('POST', '/firefly/summary', {'start': a.start, 'end': a.end}, timeout=300)
+    else:
+        r = c.call('POST', '/firefly/merchants', {'start': a.start, 'end': a.end, 'limit': a.limit}, timeout=300)
+    print(json.dumps(r, indent=1, ensure_ascii=False))
+    return 0
+
+
+def firefly_rules_set(c, a):
+    """The owner's Firefly sync rules (JSON on stdin) -> the vault, write-only. Prints counts + sha256, never values."""
+    try:
+        rules = json.loads(sys.stdin.read())
+    except ValueError:
+        die('rules-set: stdin must be the rules JSON (it is never printed)', 2)
+    if not isinstance(rules, dict):
+        die('rules-set: stdin must be a JSON object', 2)
+    body = {'rules': rules}
+    if a.request_id:
+        body.update(request_id=a.request_id, code=a.code)
+    deadline = time.time() + 100
+    while True:                                        # after a finance-rules request: wait for the owner's tap
+        r = c.call('POST', '/finance/rules', body, timeout=120, ok_codes=(409,))
+        if r.get('code') != 'request_pending':
+            if r.get('code'):
+                die(r.get('error') or 'conflict', 1)
+            break
+        if time.time() >= deadline:
+            print(f"request {a.request_id}: the owner hasn't decided yet; run this again", file=sys.stderr)
+            sys.exit(EXIT_CODE_PENDING)
+        time.sleep(3)
+    print(json.dumps({k: r.get(k) for k in ('ok', 'replaced', 'sha256', 'bytes', 'sections')}, indent=1))
+    return 0
+
+
+def cmd_ha(c, argv):
+    """Home Assistant: phase 1 inventory (metadata only), phase 2 `now` (the vault's coarse flags)."""
+    p = argparse.ArgumentParser(prog='vault ha')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    sp.add_parser('inventory').add_argument('--json', action='store_true')
+    sp.add_parser('now').add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    if a.cmd == 'now':
+        r = c.call('GET', '/ha/now', timeout=30)
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+        else:
+            print('\n'.join(ha_now_lines(r)))
+        return 0
+    r = c.call('GET', '/ha/inventory', timeout=60)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    n = r.get('counts') or {}
+    print(f"person {r.get('person')} · trackers {', '.join(r.get('owner_trackers') or []) or 'none'} · "
+          f"{n.get('states')} states in HA · {n.get('owner')} owner + {n.get('unattributed')} unattributed entities · "
+          f"{r.get('excluded_other_people')} of other people excluded")
+    print(f"zones ({len(r.get('zones') or [])}): {', '.join(r.get('zones') or [])}")
+    for e in r.get('entities') or []:
+        dc = '/'.join(x for x in (e.get('device_class'), e.get('unit')) if x) or '-'
+        tag = '' if e.get('owner') == 'owner' else '  [unattributed]'
+        print(f"- {e['entity_id']} · {e.get('kind')} · {dc} · {e.get('friendly_name') or '-'} · "
+              f"attrs: {', '.join(e.get('attr_keys') or []) or '-'}{tag}")
+    return 0
+
+
+PEOPLE_RELATIONS = ('family', 'partner', 'friend', 'colleague', 'work', 'service', 'acquaintance', 'other')
+
+
+def people_line(x):
+    lc, m = x.get('last_contact') or {}, x.get('messages_30d') or {}
+    rel = (x.get('relation') or {}).get('value') or '-'
+    v2 = ''
+    if 'open_asks' in x:
+        v2 = (f" · {x['open_asks']} open ask(s)" if x.get('open_asks') else '') + \
+            (f" · topics: {', '.join(x['topics'])}" if x.get('topics') else '')
+    return (f"- {x.get('person')} [{x.get('key')}] · {rel} · last: them {lc.get('from_them') or '-'}, you "
+            f"{lc.get('from_owner') or '-'} · 30d: {m.get('in', 0)} in / {m.get('out', 0)} out" + v2)
+
+
+def people_ask_line(a):
+    who = 'they ask you' if a.get('dir') == 'from_them' else 'you asked them'
+    return (f"  - {who}: {a.get('wants')} · urgency {a.get('urgency')}" + (f" · due {a['due']}" if a.get('due') else '')
+            + f" · since {a.get('since')} · {a.get('status')} · {' '.join(a.get('refs') or [])} · expires "
+            f"{a.get('expires')} ({a.get('src')})")
+
+
+def people_card_lines(x):
+    r, lc, m = x.get('relation') or {}, x.get('last_contact') or {}, x.get('messages') or {}
+    win = ' · '.join(f"{k} {(m.get(k) or {}).get('in', 0)}/{(m.get(k) or {}).get('out', 0)}" for k in ('30d', '90d',
+                                                                                                       '365d'))
+    return [f"{x.get('person')} [{x.get('key')}]",
+            'relation: ' + (f"{r['value']} ({r.get('by')}, {r.get('at')})" if r else 'not set (only he sets it)'),
+            f"DM since {x.get('dm_since') or '?'} · {x.get('groups_shared', 0)} shared group(s)",
+            f"last contact: from them {lc.get('from_them') or '-'} · from you {lc.get('from_owner') or '-'}",
+            f"messages in/out: {win}"] + _people_v2_lines(x) + [
+            f"(built {_hm(x.get('built'))}; {x.get('note')})"]
+
+
+def _people_v2_lines(x):
+    if 'open_asks' not in x:
+        return []
+    asks, n = x.get('open_asks') or [], x.get('open_asks_total') or 0
+    out = [f"open asks: {n}" + (f" (showing {len(asks)})" if n > len(asks) else '')] + [people_ask_line(a) for a in asks]
+    t = x.get('topics_90d') or []
+    st = x.get('topics_status')
+    out.append('topics (90 days): ' + (', '.join(f"{y['topic']} {y['n']}" for y in t) if t else
+                                       '-' if st == 'ok' else f'- ({st})'))
+    return out
+
+
+def _ix_row(name, r, kw):
+    if 'error' in r:
+        return f"  {name:<15} failed ({r['error']})"
+    v, h, sp, ram = r['vector']['all'], r['hybrid']['all'], r.get('speed') or {}, r.get('ram') or {}
+    g = r.get('gate') or {}
+    return (f"  {name:<15} {v.get('r10', 0):>6.2f}  {h.get('r5', 0):>5.2f} {h.get('r10', 0):>5.2f} {h.get('mrr', 0):>5.2f}"
+            f"  {'pass' if g.get('passed') else 'no':<4}  {sp.get('tok_per_s') or '-':>6}  {sp.get('query_ms_p95') or '-':>5}"
+            f"  {ram.get('peak_rss_mb') or '-':>5}  {(r.get('smoke') or {}).get('r1', '-')}")
+
+
+def cmd_index(c, argv):
+    """Semantic index: embed server + sqlite-vec status, the in-vault bake-off (numbers only)."""
+    sub = argv[0] if argv[:1] and argv[0] in ('status', 'eval', 'rebuild') else 'status'
+    rest = argv[1:] if argv[:1] and argv[0] in ('status', 'eval', 'rebuild') else argv
+    p = argparse.ArgumentParser(prog=f'vault index {sub}')
+    p.add_argument('--json', action='store_true')
+    if sub == 'status':
+        p.add_argument('--full', action='store_true', help='the last bake-off per language bucket')
+    elif sub == 'rebuild':
+        p.add_argument('--reconcile', action='store_true', help='a reconcile (HMAC check of every chunk) instead')
+    else:
+        p.add_argument('--sample', type=int, help='chunks (default 2000)')
+        p.add_argument('--queries', type=int, help='questions Gemma writes (default 400)')
+        p.add_argument('--models', help='comma list (default: every pinned model)')
+        p.add_argument('--seed', type=int)
+    a = p.parse_args(rest)
+    if sub == 'rebuild':
+        r = c.call('POST', '/index/rebuild', {'mode': 'reconcile' if a.reconcile else 'rebuild'}, timeout=60)
+        print(json.dumps(r) if a.json else f"queued: {r.get('queued')} (progress: vault index status)")
+        return 0
+    if sub == 'eval':
+        body = {k: v for k, v in (('sample', a.sample), ('queries', a.queries), ('models', a.models),
+                                  ('seed', a.seed)) if v is not None}
+        j = c.call('POST', '/jobs', {'op': 'index.eval', 'params': body}, timeout=60)
+        print(j['id'])
+        print(f"vault: index eval job {j['id']} started (background priority, ~1-2 h). Progress: vault job list; "
+              f"numbers: vault index status --full", file=sys.stderr)
+        return 0
+    r = c.call('GET', '/index/status' + ('?full=1' if a.full else ''), timeout=60)
+    if a.json:
+        print(json.dumps(r, indent=1, ensure_ascii=False))
+        return 0
+    e, vec = r.get('embed') or {}, r.get('vec') or {}
+    print(f"🧠 embed server: {e.get('model') or 'off'}" + (f" {e.get('state')}" if e.get('on') else '')
+          + (f" ({e.get('sched')} priority, {e.get('threads')} threads, {e.get('rss_mb')} MB)" if e.get('sched') else '')
+          + (f" [{e['detail']}]" if e.get('detail') else '')
+          + f" · sqlite-vec {vec.get('version') or 'not loadable'}"
+          + (' · eval running' if r.get('eval_running') else ''))
+    ix = r.get('index') or {}
+    pr = ix.get('progress') or {}
+    line = (f"📚 index: {ix.get('chunks')} chunks in {ix.get('chats')} chats, {ix.get('size_mb')} MB, "
+            f"updated {_hm(ix.get('updated_at'))}, reconciled {_hm(ix.get('reconciled_at'))}"
+            + ('' if ix.get('current', True) else ' (old model/chunker: rebuild due)')) if ix.get('built') \
+        else f"📚 index: not built ({ix.get('unavailable') or 'off'})"
+    line += f" · {ix.get('state')}" + (f" {pr.get('step')} {pr.get('done')}/{pr.get('total')}" if pr else '')
+    if ix.get('shadow_chunks') is not None:
+        line += f" · shadow {ix['shadow_chunks']} chunks"
+    line += (f" · hybrid {'default' if ix.get('hybrid_default') else 'per call (VAULT_INDEX off)'}"
+             + (f" · unavailable: {ix['unavailable']}" if ix.get('built') and ix.get('unavailable') else '')
+             + (f" · error {ix['error']}" if ix.get('error') else ''))
+    print(line)
+    ev = r.get('eval')
+    if not ev:
+        print('no bake-off yet: vault index eval')
+        return 0
+    full = r.get('eval_full') or {}
+    print(f"bake-off {_hm(ev.get('at'))}: {ev.get('n_chunks')} chunks, {ev.get('n_queries')} questions; keyword "
+          f"r@10 {ev.get('keyword_r10')}; recommended: {ev.get('recommended')}")
+    if not full:
+        for m, x in (ev.get('models') or {}).items():
+            print(f"  {m:<15} vector r@10 {x.get('vector_r10')}  hybrid r@10 {x.get('hybrid_r10')}  "
+                  f"C4 gate {'pass' if x.get('gate') else 'no'}")
+        return 0
+    kw = full.get('keyword') or {}
+    print(f"  {'model':<15} {'vec@10':>6}  {'hy@5':>5} {'hy@10':>5} {'MRR':>5}  gate  {'tok/s':>6}  {'q p95':>5}  "
+          f"{'RSS':>5}  smoke@1")
+    print(f"  {'keyword':<15} {'':>6}  {kw['all'].get('r5', 0):>5.2f} {kw['all'].get('r10', 0):>5.2f} "
+          f"{kw['all'].get('mrr', 0):>5.2f}")
+    for m, x in (full.get('models') or {}).items():
+        print(_ix_row(m, x, kw))
+    print(f"  languages (questions): {full.get('langs')}; same/cross-lingual r@10 below")
+    for lang, s in sorted((kw.get('lang') or {}).items()):
+        line = f"    {lang:<5} n={s['n']:<4} keyword {s['r10']:.2f}"
+        for m, x in (full.get('models') or {}).items():
+            hs = ((x.get('hybrid') or {}).get('lang') or {}).get(lang) or {}
+            vs = ((x.get('vector') or {}).get('lang') or {}).get(lang) or {}
+            line += f" | {m} vec {vs.get('r10', 0):.2f} hy {hs.get('r10', 0):.2f}"
+        print(line)
+    for key in ('same', 'cross'):
+        s = (kw.get('cross') or {}).get(key) or {}
+        line = f"    {key:<5} n={s.get('n', 0):<4} keyword {s.get('r10', 0):.2f}"
+        for m, x in (full.get('models') or {}).items():
+            hs = ((x.get('hybrid') or {}).get('cross') or {}).get(key) or {}
+            line += f" | {m} hy {hs.get('r10', 0):.2f}"
+        print(line)
+    return 0
+
+
+def cmd_people(c, argv):
+    """Person cards: metadata only; relation only from the owner."""
+    subs = ('list', 'show', 'relation', 'forget', 'unforget', 'rebuild', 'refresh', 'calibrate')
+    sub = argv[0] if argv[:1] and argv[0] in subs else 'list'
+    rest = argv[1:] if argv[:1] and argv[0] in subs else argv
+    p = argparse.ArgumentParser(prog=f'vault people {sub}'.replace(' list', ''))
+    p.add_argument('--json', action='store_true')
+    if sub == 'list':
+        p.add_argument('--active', help='only contact in the last N days, e.g. 90d')
+        p.add_argument('--relation', choices=PEOPLE_RELATIONS + ('set', 'unset'))
+        p.add_argument('-n', type=int, default=20)
+        p.add_argument('--asks', action='store_true', help='only cards with open asks')
+    elif sub == 'refresh':
+        p.add_argument('what', choices=('asks', 'topics'))
+        p.add_argument('--sample', type=int, help='asks: a dry run over his newest N messages (<= 30)')
+    elif sub == 'calibrate':
+        p.add_argument('--sample', type=int, help='chunks Gemma labels (default 300)')
+        p.add_argument('--dry', action='store_true', help='numbers only, the setting is not changed')
+        p.add_argument('--force', action='store_true', help='a full calibration by day')
+    elif sub in ('show', 'forget', 'unforget'):
+        p.add_argument('person', help='first name (or his alias) as on the card, or its key p-xxxxxxxx')
+    elif sub == 'relation':
+        p.add_argument('person')
+        p.add_argument('value', nargs='?', choices=PEOPLE_RELATIONS + ('unset',),
+                       help='only when he told you; without it the vault bot asks him')
+    a = p.parse_args(rest)
+    if sub == 'list':
+        qs = urllib.parse.urlencode({k: v for k, v in (('active', a.active), ('relation', a.relation), ('n', a.n),
+                                                       ('asks', 1 if a.asks else None)) if v is not None})
+        r = c.call('GET', '/people' + (f'?{qs}' if qs else ''), timeout=120)
+        if a.json:
+            print(json.dumps(r, indent=1, ensure_ascii=False))
+            return 0
+        sc = r.get('scope') or {}
+        print(f"👤 {r.get('shown', 0)} of {r.get('matching', 0)} card(s)" + (f" ({r.get('total')} in all)"
+                                                                         if r.get('total') != r.get('matching') else '')
+              + f" · DM contacts with >= {sc.get('min_messages')} msgs in {sc.get('days')} days · built "
+              f"{_hm(r.get('built'))}")
+        for x in r.get('cards') or []:
+            print(people_line(x))
+        return 0
+    if sub == 'rebuild':
+        r = c.call('POST', '/people/rebuild', {}, timeout=300)
+    elif sub == 'refresh':
+        body = {'what': a.what, **({'sample': a.sample} if a.sample else {})}
+        r = c.call('POST', '/people/refresh', body, timeout=900)
+    elif sub == 'calibrate':
+        body = {k: v for k, v in (('what', 'calibrate'), ('sample', a.sample), ('dry', a.dry or None),
+                                  ('force', a.force or None)) if v is not None}
+        j = c.call('POST', '/jobs', {'op': 'people.refresh', 'params': body}, timeout=60)
+        print(j['id'])
+        print(f"vault: topic calibration job {j['id']} started (background priority). Progress: vault job list; "
+              f"numbers: vault job wait {j['id']}", file=sys.stderr)
+        return 0
+    elif sub == 'show':
+        r = c.call('POST', '/people/show', {'person': a.person}, timeout=120)
+        if not a.json:
+            print('\n'.join(people_card_lines(r.get('card') or {})))
+            return 0
+    elif sub == 'relation':
+        body = {'person': a.person, 'relation': a.value}
+        r = c.call('POST', '/people/relation', {k: v for k, v in body.items() if v is not None}, timeout=120)
+        if not a.json:
+            if 'asked' in r:
+                print(f"asked him in the vault bot: who is {r.get('person')}? ({r.get('questions_left_today')} "
+                      f"question(s) left today)" if r['asked'] else
+                      f"already asked about {r.get('person')} on {r.get('pending_since')} (no answer yet)")
+            else:
+                rel = (r.get('relation') or {}).get('value') or 'unset'
+                print(f"set {r.get('person')} = {rel} (assistant_relay; was {r.get('previous') or 'unset'}); the vault "
+                      f"bot told him, with Undo")
+            return 0
+    else:
+        r = c.call('POST', '/people/forget', {'person': a.person, 'undo': sub == 'unforget'}, timeout=120)
+        if not a.json:
+            print(f"forgot {r.get('person')} [{r.get('key')}]: card and relation deleted, kept off" if r.get('forgotten')
+                  else f"{r.get('key')}: no longer forgotten; {r.get('note')}")
+            return 0
+    print(json.dumps(r, indent=1, ensure_ascii=False))
+    return 0
+
+
+HA_BANDS = {'near': '< 5 km from home', 'region': '5-50 km from home', 'far': '> 50 km from home'}
+
+
+def _hhmm(iso):
+    """'14:02' today, else 'Fri 16.10 06:30' (input: the vault's local ISO times)."""
+    if not iso:
+        return '?'
+    try:
+        t = dt.datetime.fromisoformat(iso)
+    except ValueError:
+        return '?'
+    return t.strftime('%H:%M') if t.date() == dt.date.today() else t.strftime('%a %d.%m %H:%M')
+
+
+def ha_place_text(p):
+    if not p:
+        return 'unknown (no position from the phone)'
+    if p.get('kind') == 'home':
+        out = 'home'
+    elif p.get('kind') == 'zone':
+        out = f"in zone {p.get('zone')}" + (f" ({HA_BANDS[p['band']]})" if p.get('band') in HA_BANDS else '')
+    else:
+        out = 'away' + (f", {HA_BANDS[p['band']]}" if p.get('band') in HA_BANDS else ', distance unknown')
+        out += f", near {p['town']}" if p.get('town') else ''
+    return out
+
+
+def ha_now_lines(r):
+    p = r.get('place')
+    conn = r.get('connection') or {}
+    l1 = f"place: {ha_place_text(p)} [{(p or {}).get('flag', '?')}]"
+    if p and p.get('since'):
+        l1 += f" · since {_hhmm(p['since'])}"
+    if p and p.get('fix_age_min') is not None:
+        l1 += f" · position {p['fix_age_min']} min old"
+    d = r.get('drive')
+    drive = 'unknown' if d is None else (f"driving since {_hhmm(d.get('since'))} ({d.get('minutes')} min)"
+                                         if d.get('active') else 'no')
+    bits = [f'drive: {drive}']
+    if r.get('activity'):
+        bits.append(f"activity: {r['activity']}")
+    if r.get('bluetooth') is not None:
+        bits.append(f"bluetooth: {', '.join(r['bluetooth']) or 'none'}")
+    if r.get('wifi'):
+        bits.append(f"wifi: {r['wifi']}")
+    l2 = ' · '.join(bits)
+    bits = []
+    if r.get('sleep'):
+        ls = r.get('last_sleep') or {}
+        bits.append(f"sleep: {r['sleep']}" + (f" (last {ls.get('hours')} h, ended {_hhmm(ls.get('ended') and ls['ended'] + ':00')})"
+                                               if ls.get('hours') is not None else ''))
+    if r.get('alarm'):
+        bits.append(f"alarm: {_hhmm(r['alarm'] + ':00')}")
+    b = r.get('battery')
+    if b:
+        bits.append(f"battery: {b.get('level')}%" + (' charging' if b.get('charging') else '')
+                    + (' (low)' if b.get('band') == 'low' else ''))
+    if r.get('on_call'):
+        bits.append('on a call')
+    if r.get('dnd'):
+        bits.append('do not disturb')
+    lines = [l1, l2] + ([' · '.join(bits)] if bits else [])
+    age = r.get('age_min')
+    lines.append(f"feed: {conn.get('state')}" + (f" since {_hhmm(conn['connected_since'])}" if
+                                                  conn.get('connected_since') else '')
+                 + f" · {conn.get('subscribed') or 0} entities · last update "
+                 + (f'{age} min ago' if age is not None else 'never')
+                 + (f" · error: {conn['error']}" if conn.get('error') else ''))
+    return lines
+
+def cmd_llm_run(c, argv):
+    if argv[:1] == ['--']:
+        argv = argv[1:]
+    text = sys.stdin.read()
+    emit(c.call('POST', '/llm/run', {'args': argv, 'text': text}, timeout=LONG))
+
+
+def cmd_secret(c, argv):
+    p = argparse.ArgumentParser(prog='vault secret')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    sp.add_parser('list')
+    s = sp.add_parser('set', help='JSON object on stdin, e.g. {"url": "...", "token": "..."}; never printed')
+    s.add_argument('name')
+    s.add_argument('--request-id')
+    s.add_argument('--code')
+    r = sp.add_parser('rotate', help='ask the owner for a code to replace a stored secret')
+    r.add_argument('name')
+    r.add_argument('--reason', required=True)
+    a = p.parse_args(argv)
+    if a.cmd == 'list':
+        print(json.dumps(c.call('GET', '/secrets')['secrets'], indent=1))
+        return 0
+    if a.cmd == 'rotate':
+        r = c.call('POST', '/raw/request', {'source': 'secret-rotate', 'reason': a.reason, 'query': {'name': a.name}})
+        raw_requested(r, f"vault secret set {a.name} --request-id {r['request_id']} < new.json")
+    try:
+        body = json.loads(sys.stdin.read())
+    except ValueError:
+        die('secret set: stdin must be a JSON object (it is never printed)', 2)
+    if not isinstance(body, dict):
+        die('secret set: stdin must be a JSON object', 2)
+    if a.request_id:
+        body.update(request_id=a.request_id, code=a.code)
+    deadline = time.time() + 100
+    while True:                                        # after a secret-rotate request: wait for the owner's tap
+        r = c.call('POST', f'/secrets/{a.name}', body, timeout=120, ok_codes=(409,))
+        if r.get('code') != 'request_pending':
+            if r.get('code'):
+                die(r.get('error') or 'conflict', 1)
+            break
+        if time.time() >= deadline:
+            print(f"request {a.request_id}: the owner hasn't decided yet; run this again", file=sys.stderr)
+            sys.exit(EXIT_CODE_PENDING)
+        time.sleep(3)
+    print(f"secret {a.name}: {'replaced' if r.get('replaced') else 'stored'}" + (f"; {r['check']}" if r.get('check') else ''))
+    return 0
+
+
+# ============================================================================================ admin (Unraid)
+
+DEPLOY_EXIT = {'deployed': 0, 'failed': 1, 'refused': 1, 'denied': 1, 'expired': 1, 'cancelled': 1}
+DEPLOY_STATE = {'reviewing': 'his server is reviewing it (within ~2 min)',
+                'awaiting': 'the card is out: waiting for his ✅ Deploy / ❌ Cancel in the vault bot',
+                'approved': 'approved: waiting for his server to start it (within a minute)',
+                'deploying': 'his server is deploying it (build + tests: a few minutes)', 'deployed': 'DEPLOYED',
+                'failed': 'FAILED', 'refused': 'not deployed', 'denied': 'cancelled by him', 'expired': 'expired',
+                'cancelled': 'replaced by a newer request'}
+
+
+def deploy_line(r):
+    rv = r.get('review') or {}
+    s = f"deploy {r['request_id'][:8]} {r['commit'][:7]}: {DEPLOY_STATE.get(r['state'], r['state'])}"
+    if r.get('reason'):
+        s += f" ({r['reason']})"
+    if rv:
+        flags = [f for f, on in (('WEIGHTS CHANGED', rv.get('weights') == 'changed'),
+                                 ('privacy filter changed', rv.get('privacy') == 'changed'),
+                                 ('image build changed', rv.get('build') == 'changed')) if on]
+        s += (f"\n  {rv.get('kind')}: {rv.get('commits')} commit(s), {rv.get('files')} file(s)"
+              + ''.join(f', {f}' for f in flags) + f" · {rv.get('subject', '')}")
+    return s
+
+
+def runner_line(run):
+    if not run.get('alive'):
+        return (f"deploy runner: NOT SEEN for 5 min (last {run.get('seen') or 'never'}): not installed or not "
+                'scheduled on the server (deploys need his User Scripts button)')
+    job = run.get('job') or {}
+    busy = f", busy: {job.get('step')} {str(job.get('request_id'))[:8]}" if job else ''
+    return f"deploy runner: {run.get('state')}{busy} · the vault runs {(run.get('deployed') or 'unknown')[:7]}"
+
+
+def resolve_commit(spec):
+    """COMMIT (any form) -> the full sha, which must be on origin/main (what the server can fetch)."""
+    r = git('rev-parse', '--verify', '--quiet', f'{spec}^{{commit}}')
+    sha = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', sha):
+        die(f'{spec!r} is not a commit in {SRC}', 2)
+    if git('merge-base', '--is-ancestor', sha, 'origin/main').returncode != 0:
+        die(f'{sha[:7]} is not on GitHub main yet: push it first (vault admin deploy)', 3)
+    return sha
+
+
+def deploy_call(c, method, path, body=None):
+    """A /deploy/* call; a vault without these routes says how to get them (one deploy by his button)."""
+    r = c.call(method, path, body, ok_codes=(404,))
+    err = str(r.get('error') or '') if isinstance(r, dict) else ''
+    if err.startswith('no such endpoint'):
+        die('the running vault has no Telegram deploys yet: deploy a commit that has them (app/deploys.py) once with '
+            'his User Scripts button "claude-vault deploy" (vault admin deploy prints the commit)', 3)
+    if err:
+        die(err, http_exit(404, r.get('code')))
+    return r
+
+
+def cmd_deploy(c, argv):
+    p = argparse.ArgumentParser(prog='vault deploy', description='Telegram-approved vault deploys: his server reviews '
+                                'the commit, the vault bot asks him (✅ Deploy / ❌ Cancel), his server deploys it')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    rq = sp.add_parser('request', help='ask him to deploy COMMIT (default HEAD; must be on GitHub main)')
+    rq.add_argument('commit', nargs='?', default='HEAD')
+    st = sp.add_parser('status', help='the runner and the deploy requests (or one: ID or its first 8 characters)')
+    st.add_argument('id', nargs='?')
+    for x in (rq, st):
+        x.add_argument('--wait', type=int, default=0, help='seconds to wait for a final state (exit 10 if none yet)')
+        x.add_argument('--json', action='store_true')
+    a = p.parse_args(argv)
+    if a.cmd == 'request':
+        sha = resolve_commit(a.commit)
+        r = deploy_call(c, 'POST', '/deploy/request', {'commit': sha})
+        rid = r['request_id']
+        if not a.json:
+            print(f'deploy request {rid[:8]} for {sha[:7]}: his server reviews it, then the vault bot asks him '
+                  f'(✅ Deploy / ❌ Cancel); see: vault deploy status {rid[:8]}')
+    else:
+        rid = a.id
+    if not rid:
+        s = deploy_call(c, 'GET', '/deploy/status')
+        if a.json:
+            print(json.dumps(s, indent=1, ensure_ascii=False))
+            return 0
+        print(runner_line(s.get('runner') or {}))
+        for r in s.get('requests') or []:
+            print(deploy_line(r))
+        return 0
+    if not re.fullmatch(r'[0-9a-f]{6,32}', rid):
+        die('ID: the request id (6-32 hex characters)', 2)
+    deadline, told = time.monotonic() + max(0, min(a.wait, 7200)), None
+    while True:
+        s = deploy_call(c, 'GET', f'/deploy/status?id={rid}')
+        r = s['request']
+        if r['state'] in DEPLOY_EXIT or time.monotonic() >= deadline:
+            break
+        if r['state'] != told:
+            print(deploy_line(r) + f' ... (up to {int(deadline - time.monotonic())} s more)', file=sys.stderr)
+            told = r['state']
+        time.sleep(max(1, min(10, deadline - time.monotonic())))
+    if a.json:
+        print(json.dumps(s, indent=1, ensure_ascii=False))
+    elif a.cmd == 'status' or r['state'] in DEPLOY_EXIT:
+        print(runner_line(s.get('runner') or {}))
+        print(deploy_line(r))
+    return DEPLOY_EXIT.get(r['state'], 10)
+
+
+def ssh(cmd, stdin=None, check=True, capture=False, timeout=3600):
+    p = subprocess.run(['ssh', '-o', 'BatchMode=yes', SSH, cmd], input=stdin, text=True, timeout=timeout,
+                       capture_output=capture)
+    if check and p.returncode != 0:
+        die(f'ssh {SSH} failed (exit {p.returncode}): {cmd[:120]}' + (f'\n{p.stderr.strip()[-800:]}' if capture else ''))
+    return p
+
+
+# ---- the owner's SSH lockdown (~/opt/unraid-lockdown): my key is forced into the dispatcher
+# (/boot/config/ssh/claude-bot-cmd), so I can't build, start or stop the vault. `deploy` pushes the source to GitHub
+# and hands the owner the commit; he deploys it with vault-deploy (User Scripts) on Unraid or approves a Telegram
+# deploy (`vault deploy request`). logs/ps use the read-only verbs vault-logs/vault-ps. ~/bin/unraid-ssh reports
+# the mode; the root-mode paths below only run on a server without the lockdown.
+UNRAID_SSH = os.environ.get('UNRAID_SSH_BIN') or os.path.join(HOME, 'bin', 'unraid-ssh')
+SENSITIVE = (('vendor/llm-local', 'privacy filter / anonymizer prompts'), ('app/', 'the vault itself'),
+             ('Dockerfile', 'image build'), ('docker-compose.yml', 'container privileges, network, volume'),
+             ('.dockerignore', 'build context'), ('vault.env', "the vault's settings"),
+             ('.gitattributes', 'what the deploy exports'), ('requirements/', 'Python dependencies'),
+             ('vendor/', 'vendored tools'))
+
+
+def lockdown_mode():
+    try:
+        m = subprocess.run([UNRAID_SSH, 'mode'], capture_output=True, text=True, timeout=90).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return 'root'
+    return m if m in ('verbs', 'emulate') else 'root'
+
+
+def verb(*args, check=False, capture=False):
+    p = subprocess.run([UNRAID_SSH, '--host', SSH, 'run', *args], text=True, capture_output=capture, timeout=600,
+                       stdin=subprocess.DEVNULL)
+    if check and p.returncode != 0:
+        die(f'unraid-ssh run {" ".join(args)} failed (exit {p.returncode})' + (f'\n{p.stderr.strip()[-400:]}' if capture else ''))
+    return p
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', SRC, *args], capture_output=True, text=True)
+
+
+def admin_release():
+    """Lockdown on: push to GitHub (vault-git-sync) and print what the owner needs for his vault-deploy run."""
+    r = subprocess.run([os.environ.get('VAULT_GIT_SYNC', '/home/node/bin/vault-git-sync'),
+                        'release ' + time.strftime('%Y-%m-%d %H:%M')])
+    if r.returncode != 0:
+        die('vault-git-sync failed: nothing new is on GitHub, so there is nothing to deploy', 3)
+    sha = git('rev-parse', 'HEAD').stdout.strip()
+    if git('rev-list', '--count', 'origin/main..HEAD').stdout.strip() != '0':
+        die(f'{sha[:7]} is not on origin/main yet (push failed?)', 3)
+    dep = (verb('vault-deployed', capture=True).stdout or '').strip()
+    dep = dep if re.fullmatch(r'[0-9a-f]{7,40}', dep) else ''
+    print(f'ready for your deploy: {sha[:7]}')
+    if dep and git('cat-file', '-e', dep + '^{commit}').returncode == 0:
+        if git('rev-parse', dep).stdout.strip() == sha:
+            print(f'(already deployed: the vault runs {sha[:7]})')
+            return 0
+        log = git('log', '--oneline', '--no-decorate', f'{dep}..{sha}').stdout.strip().splitlines()
+        files = git('diff', '--name-only', dep, sha).stdout.split()
+        print(f'since your last deploy ({dep[:7]}): {len(log)} commit(s), {len(files)} file(s)')
+        for line in log[:8]:
+            print('  ' + line)
+        flagged = []
+        for f in files:
+            why = next((w for pre, w in SENSITIVE if f == pre or f.startswith(pre)), None)
+            if why and f'{why}' not in [x[1] for x in flagged]:
+                flagged.append((f, why))
+        for f, why in flagged:
+            print(f'  ⚠ {f}: {why}')
+    else:
+        print('(no deployed commit recorded yet: your first vault-deploy shows the whole tree)')
+    print(f'By Telegram: vault deploy request {sha[:7]} (his server reviews it, he taps ✅ in the vault bot; not for\n'
+          f'  docker-compose.yml changes or a first deploy).\n'
+          f'Or on Unraid: Settings > User Scripts > "claude-vault deploy" > Run Script > {sha[:7]} (review),\n'
+          f'then Run Script again with: {sha[:7]} confirm')
+    return 0
+
+
+LOCKED = {'restart': 'restart it from the Unraid Docker tab (or: docker restart claude-vault)',
+          'down': 'stop it from the Unraid Docker tab',
+          'init': 'the token hash goes into the vault with: vault-deploy token-hash <sha256> (owner, on Unraid)',
+          'test': 'vault-deploy runs the image tests before every deploy',
+          'test-instance': 'the throwaway test vault needs docker run on the server, which my key does not have',
+          'env-add': 'add the KEY=VALUE lines to the vault\'s .env on Unraid by hand (vault-deploy keeps the .env)'}
+
+
+def stage():
+    """~/opt/claude-vault + the vendored tools and test suites -> ~/.cache/vault/stage (what gets built)."""
+    shutil.rmtree(STAGE, ignore_errors=True)
+    ign = shutil.ignore_patterns('__pycache__', '*.pyc', '.env', 'bench', 'firefly_rules.json')   # private rules: vault only
+    for name in ('Dockerfile', 'docker-compose.yml', 'vault.env', '.dockerignore', '.env.example'):   # compose reads vault.env
+        os.makedirs(STAGE, exist_ok=True)
+        shutil.copy2(os.path.join(SRC, name), os.path.join(STAGE, name))
+    for d in ('app', 'vendor', 'requirements', 'tests'):
+        shutil.copytree(os.path.join(SRC, d), os.path.join(STAGE, d), ignore=ign)
+    for f in ('llm-local', 'secretscan.py', 'bills'):
+        shutil.copy2(os.path.join(HOME, 'bin', f), os.path.join(STAGE, 'vendor', f))
+    for t in ('tgread', 'llm-local'):                  # ~/opt is authoritative (vault-git-sync mirrors it into the repo)
+        shutil.rmtree(os.path.join(STAGE, 'tests', t), ignore_errors=True)
+        shutil.copytree(os.path.join(HOME, 'opt', f'{t}-tests'), os.path.join(STAGE, 'tests', t), ignore=ign)
+    return STAGE
+
+
+def admin_init():
+    tf = INSTANCE['prod'][1]
+    if not os.path.exists(tf):
+        write_private(tf, secrets.token_urlsafe(32) + '\n')
+        print(f'new API token in {tf} (0600)')
+    h = hashlib.sha256(read_file(tf).encode()).hexdigest()
+    ssh(f'mkdir -p {REMOTE}')
+    env_merge([('VAULT_TOKEN_SHA256', h)], create=True, tag='init')   # keeps the deployment values (env-add)
+    print(f'token hash written to {SSH}:{REMOTE}/.env (sha256 {h[:12]}…); `vault admin restart` if the vault runs')
+    return 0
+
+
+# ---- vault admin env-add: this server's deployment values (docker-compose.yml reads ${VAULT_...} from the vault's
+# .env). Only allowlisted keys, each with a strict non-secret value shape. The merge runs on the server (awk), so no
+# other line of the .env (the API token hash) ever leaves it: the output is "added|updated|unchanged KEY" lines.
+# Atomic (temp file + mv in the same dir, owner and mode of the old file), one timestamped backup per change in a
+# sibling dir (deploy's rsync --delete would remove a backup next to the .env), one audit line there and one here.
+ENV_ADD_KEYS = {
+    'VAULT_HA_DEVICE': (r'[a-z0-9_]{0,64}', 'a Home Assistant entity prefix (a-z 0-9 _) or blank'),
+    'VAULT_MODELS_DIR': (r'(?:\.?/)?[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*/?', 'a host directory path, no ..'),
+    'VAULT_CPUS': (r'[0-9]{1,3}(?:\.[0-9]{1,2})?', 'a CPU count > 0, e.g. 8 or 7.5'),
+    'VAULT_CPUSET': (r'[0-9]{1,3}(?:-[0-9]{1,3})?(?:,[0-9]{1,3}(?:-[0-9]{1,3})?)*', 'a cpuset list, e.g. 0-5,8,9'),
+    'VAULT_MEM_LIMIT': (r'[0-9]{1,7}[bkmgBKMG]?', 'a memory limit, e.g. 22g'),
+}
+ENV_KEY_SHAPE = re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+ENV_BACKUPS_SUFFIX = '-env-backups'
+ENV_AUDIT = os.path.join(HOME, '.local', 'state', 'vault', 'admin-audit.log')
+_ENV_AWK = r'''BEGIN { n = split(keys, K, ";"); split(vals, V, ";"); for (i = 1; i <= n; i++) at[K[i]] = i }
+{
+  x = $0; sub(/^[ \t]*(export[ \t]+)?/, "", x); e = index(x, "=")
+  if (e > 1) {
+    k = substr(x, 1, e - 1); sub(/[ \t]+$/, "", k)
+    if (k in at) {
+      i = at[k]
+      if (!(i in st)) { st[i] = ($0 == K[i] "=" V[i]) ? "unchanged" : "updated"; print K[i] "=" V[i] }
+      else st[i] = "updated"
+      next
+    }
+  }
+  print
+}
+END { for (i = 1; i <= n; i++) { if (!(i in st)) { print K[i] "=" V[i]; st[i] = "added" }; print st[i] " " K[i] > status } }'''
+
+
+def env_add_pairs(args):
+    """[(KEY, VALUE)] from KEY=VALUE arguments: allowlisted keys, strict value shapes, no secret-looking value.
+    Errors name the argument's position or its key, never a value."""
+    if not args:
+        die('env-add: give KEY=VALUE pairs; keys: ' + ', '.join(ENV_ADD_KEYS), 2)
+    pairs, seen = [], set()
+    for n, arg in enumerate(args, 1):
+        k, sep, v = arg.partition('=')
+        if not sep or not ENV_KEY_SHAPE.fullmatch(k):
+            die(f'env-add: argument {n} is not KEY=VALUE', 2)
+        if k not in ENV_ADD_KEYS:
+            die(f'env-add: {k} is not on the allowlist; keys: ' + ', '.join(ENV_ADD_KEYS), 2)
+        if k in seen:
+            die(f'env-add: {k} given twice', 2)
+        shape, what = ENV_ADD_KEYS[k]
+        if not re.fullmatch(shape, v, re.A) or (k == 'VAULT_MODELS_DIR' and '..' in v.split('/')) \
+                or (k == 'VAULT_CPUS' and float(v) <= 0):
+            die(f'env-add: {k}: not a valid value (expected {what})', 2)
+        seen.add(k)
+        pairs.append((k, v))
+    scan = shutil.which('secretscan') or os.path.join(HOME, 'bin', 'secretscan')
+    if os.access(scan, os.X_OK):                     # extra net: the shapes above already keep tokens out
+        p = subprocess.run([scan, '--stdin', '-q'], input=''.join(f'{k}={v}\n' for k, v in pairs), text=True,
+                           capture_output=True, timeout=60)
+        if p.returncode == 1:
+            die('env-add: a value looks like a secret; this verb takes non-secret config only', 2)
+    return pairs
+
+
+def env_merge_script(pairs, remote=REMOTE, ts=None, create=False, tag='env-add'):
+    """Shell for the server: merge pairs into <remote>/.env and print only status lines (see env-add above)."""
+    q, ts = shlex.quote, ts or time.strftime('%Y%m%d-%H%M%S')
+    missing = ('touch "$f"; chmod 600 "$f"' if create else
+               f'echo "{tag}: no .env on the server (vault admin init first)" >&2; exit 4')
+    return f'''set -eu
+umask 077
+d=$(readlink -f {q(remote)})
+f="$d/.env"
+b="$d{ENV_BACKUPS_SUFFIX}"
+t="$d/.env.{tag}.$$"
+s="$t.status"
+trap 'rm -f -- "${{t:?}}" "${{s:?}}"' EXIT
+if [ -L "$f" ] || {{ [ -e "$f" ] && [ ! -f "$f" ]; }}; then echo "{tag}: the .env is not a regular file" >&2; exit 4; fi
+[ -f "$f" ] || {{ {missing}; }}
+awk -v keys={q(';'.join(k for k, _ in pairs))} -v vals={q(';'.join(v for _, v in pairs))} -v status="$s" \\
+  '{_ENV_AWK}' "$f" > "$t"
+if grep -qv '^unchanged ' "$s"; then
+  mkdir -p "$b"; chmod 700 "$b"
+  k=".env.{ts}"; [ ! -e "$b/$k" ] || k="$k.$$"
+  cp -p "$f" "$b/$k"
+  chown --reference="$f" "$t"; chmod --reference="$f" "$t"
+  mv -f "$t" "$f"
+  printf '%s %s %s backup=%s\\n' "$(date '+%F %T %z')" {q(tag)} "$(tr '\\n' ' ' < "$s")" "$k" >> "$b/audit.log"
+  echo "backup $k"
+fi
+cat "$s"
+'''
+
+
+def env_merge(pairs, create=False, tag='env-add'):
+    """Run env_merge_script on the server; returns (status lines, backup name or ''). Writes the local audit line."""
+    try:
+        p = subprocess.run(['ssh', '-o', 'BatchMode=yes', SSH, 'sh -s'], text=True, capture_output=True, timeout=120,
+                           input=env_merge_script(pairs, create=create, tag=tag))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        die(f'{tag}: ssh {SSH} failed ({type(e).__name__})', 3)
+    keys = '|'.join(re.escape(k) for k, _ in pairs)
+    lines = [ln for ln in p.stdout.splitlines() if re.fullmatch(rf'(?:added|updated|unchanged) (?:{keys})', ln)]
+    bk = next((m.group(1) for m in map(re.compile(r'backup (\.env\.[0-9-]+(?:\.[0-9]+)?)').fullmatch,
+                                       p.stdout.splitlines()) if m), '')
+    if p.returncode != 0 or len(lines) != len(pairs):
+        why = [ln for ln in p.stderr.splitlines() if ln.startswith(f'{tag}: ')][-1:]   # only my own messages
+        die(f'{tag}: the .env on {SSH} was not changed or the result is unclear (exit {p.returncode})'
+            + (f': {why[0][len(tag) + 2:]}' if why else ''), 1)
+    try:
+        os.makedirs(os.path.dirname(ENV_AUDIT), mode=0o700, exist_ok=True)
+        fd = os.open(ENV_AUDIT, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, 'a') as f:
+            f.write(f"{time.strftime('%F %T %z')} {tag} {SSH} {' '.join(lines)}" + (f' backup={bk}' if bk else '')
+                    + '\n')
+    except OSError:
+        pass
+    return lines, bk
+
+
+def admin_env_add(pairs):
+    lines, bk = env_merge(pairs)
+    print('\n'.join(lines))
+    print(f'(server: backup {bk} + audit line beside the .env; deploy to apply)' if bk else '(nothing changed)',
+          file=sys.stderr)
+    return 0
+
+
+def weight_pins(src=SRC):
+    """[(file, sha256, url)] of the local LLM's weight files (model, its MTP drafter and vision projector if any), read from
+    app/vaultd.py, the one place they are pinned (a revert there also reverts what deploy seeds)."""
+    c = {}
+    for node in ast.parse(read_file(os.path.join(src, 'app', 'vaultd.py'))).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            c[node.targets[0].id] = node.value.value
+    pins = [(c['MODEL_FILE'], c['MODEL_SHA256'], c['MODEL_URL'])]
+    if c.get('DRAFT_FILE'):
+        pins.append((c['DRAFT_FILE'], c['DRAFT_SHA256'], c['DRAFT_URL']))
+    if c.get('MMPROJ_FILE'):                         # its vision projector (photo facts); optional in the vault
+        pins.append((c['MMPROJ_FILE'], c['MMPROJ_SHA256'], c['MMPROJ_URL']))
+    for k in sorted(c):                              # embedding models EMBED_<X>_FILE/_SHA256/_URL
+        if k.startswith('EMBED_') and k.endswith('_FILE'):
+            b = k[:-len('_FILE')]
+            if not (c.get(b + '_SHA256') and c.get(b + '_URL')):
+                die(f'odd weight pin in app/vaultd.py: {k} without _SHA256/_URL', 2)
+            pins.append((c[k], c[b + '_SHA256'], c[b + '_URL']))
+    for f, sha, url in pins:                         # they end up in a root shell on Unraid: strict formats only
+        if not (re.fullmatch(r'[\w.+-]+\.gguf', f) and re.fullmatch(r'[0-9a-f]{64}', sha)
+                and re.fullmatch(r'https://huggingface\.co/[\w./+-]+', url)):
+            die(f'odd weight pin in app/vaultd.py: {f!r}', 2)
+    return pins
+
+
+def seed_script():
+    """Shell for Unraid between `up --no-start` and `up -d`: a new volume gets the vault's uid; the weights dir gets
+    every pinned file that's missing (reflink copy or download, sha256-checked, root:10001 0440)."""
+    s = ['set -e',
+         f"v=$(docker volume inspect -f '{{{{.Mountpoint}}}}' {VOL})",
+         '[ -e "$v/home" ] || { chown 10001:10001 "$v"; chmod 700 "$v"; }',
+         f'w={WEIGHTS_HOST}', 'mkdir -p "$w"; chown root:10001 "$w"; chmod 750 "$w"']
+    for f, sha, url in weight_pins():
+        s.append(f'if [ ! -f "$w/{f}" ]; then rm -f "$w/{f}.part"\n'
+                 f'  if [ -f "{WEIGHTS_SRC}/{f}" ]; then cp --reflink=auto "{WEIGHTS_SRC}/{f}" "$w/{f}.part"\n'
+                 f'  else curl -fsSL --retry 3 -o "$w/{f}.part" "{url}"; fi\n'
+                 f'  echo "{sha}  $w/{f}.part" | sha256sum -c --quiet || '
+                 f'{{ rm -f "$w/{f}.part"; echo "seed: {f} failed the sha256 check" >&2; exit 1; }}\n'
+                 f'  chown root:10001 "$w/{f}.part"; chmod 440 "$w/{f}.part"; mv "$w/{f}.part" "$w/{f}"\n'
+                 f'  echo "seeded {f} (local LLM weights)"\nfi')
+    return '\n'.join(s) + '\n'
+
+
+def admin_deploy(build=True):
+    seed = seed_script()                             # a bad weight pin stops the deploy before anything changes
+    s = stage()
+    # Unraid 7.3.3's rsync 3.5.1 refuses the exclusive-share symlink /mnt/user/appdata (owned by nobody): sync to its real path
+    real = subprocess.run(['ssh', SSH, f'readlink -f {REMOTE}'], capture_output=True, text=True, check=True).stdout.strip() or REMOTE
+    subprocess.run(['rsync', '-a', '--delete', '--exclude', '.env', s + '/', f'{SSH}:{real}/'], check=True)
+    if build:
+        ssh(f'cd {REMOTE} && docker compose build --pull=false')
+    ssh(f'cd {REMOTE} && docker compose up --no-start && {{ {seed} }} && docker compose up -d --remove-orphans'
+        ' && docker image prune -f --filter label=org.claude.vault=1 >/dev/null')   # old vault images only
+    c = Client()
+    for _ in range(60):
+        try:
+            with OPENER.open(c.url + '/health', timeout=3):
+                print('vault is up: ' + c.url)
+                subprocess.run(['/home/node/bin/vault-git-sync', 'deploy ' + time.strftime('%Y-%m-%d %H:%M')])  # GitHub backup
+                return 0
+        except OSError:
+            time.sleep(2)
+    die('the vault did not answer /health within 2 min (vault admin logs)', 3)
+
+
+def admin_test():
+    p = ssh('docker run --rm --network none --read-only --tmpfs /tmp:rw,exec,size=1g --cap-drop ALL '
+            '--security-opt no-new-privileges:true --entrypoint /bin/sh claude-vault:local '
+            '/opt/vault/tests/run-all.sh', check=False)
+    rc = p.returncode
+    try:                                             # the live vault's sqlite-vec + embed server
+        st = Client().call('GET', '/index/status', timeout=30)
+    except SystemExit:
+        print('# live vault: no /index/status (older vault)')
+        return rc
+    vec, emb = st.get('vec') or {}, st.get('embed') or {}
+    print(f"# live vault: sqlite-vec {vec.get('version') or 'NOT LOADABLE (' + str(vec.get('error')) + ')'}; embed "
+          f"server {emb.get('model') or 'off'}: {emb.get('state')}" + (f" ({emb.get('sched')} priority, "
+                                                                      f"{emb.get('rss_mb')} MB)" if emb.get('sched') else ''))
+    if not vec.get('version') or (emb.get('on') and emb.get('state') != 'running') or \
+            (emb.get('on') and emb.get('sched') != 'idle'):
+        print('LIVE INDEX CHECK FAILED')
+        rc = rc or 1
+    return rc
+
+
+def admin_test_instance(action):
+    tf = INSTANCE['test'][1]
+    if action == 'up':
+        if not os.path.exists(tf):
+            write_private(tf, secrets.token_urlsafe(32) + '\n')
+        h = hashlib.sha256(read_file(tf).encode()).hexdigest()
+        ssh('docker rm -f claude-vault-test >/dev/null 2>&1; docker run -d --name claude-vault-test '
+            '--network src_default --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true '
+            '--memory 1g -e VAULT_TEST_MODE=1 -e VAULT_NO_LLAMA=1 -e VAULT_NO_SYNC=1 '
+            f'-e VAULT_TOKEN_SHA256={h} -v claude-vault-test_data:/data claude-vault:local >/dev/null')
+        c = Client('test')
+        for _ in range(30):
+            try:
+                with OPENER.open(c.url + '/health', timeout=3):
+                    print('test vault up: ' + c.url)
+                    return 0
+            except OSError:
+                time.sleep(1)
+        die('test vault did not come up', 3)
+    if action == 'code':
+        p = ssh('docker logs claude-vault-test 2>&1 | grep -o "Code: [0-9]\\{6\\}" | tail -1', capture=True)
+        print(p.stdout.strip().replace('Code: ', ''))
+        return 0
+    ssh('docker rm -f claude-vault-test >/dev/null 2>&1; docker volume rm claude-vault-test_data >/dev/null 2>&1; true')
+    try:
+        os.remove(tf)
+    except FileNotFoundError:
+        pass
+    print('test vault removed (container, volume, token)')
+    return 0
+
+
+def cmd_admin(argv):
+    p = argparse.ArgumentParser(prog='vault admin')
+    sp = p.add_subparsers(dest='cmd', required=True)
+    sp.add_parser('init')
+    d = sp.add_parser('deploy')
+    d.add_argument('--no-build', action='store_true')
+    sp.add_parser('stage')
+    sp.add_parser('test')
+    lg = sp.add_parser('logs')
+    lg.add_argument('-n', type=int, default=100)
+    sp.add_parser('ps')
+    sp.add_parser('restart')
+    sp.add_parser('down')
+    ti = sp.add_parser('test-instance')
+    ti.add_argument('action', choices=['up', 'code', 'down'])
+    ea = sp.add_parser('env-add')
+    ea.add_argument('pairs', nargs=argparse.REMAINDER)    # REMAINDER: argparse never echoes a value back
+    a = p.parse_args(argv)
+    pairs = env_add_pairs(a.pairs) if a.cmd == 'env-add' else None   # usage errors before any network
+    if a.cmd != 'stage' and lockdown_mode() != 'root':     # the owner's SSH lockdown is on
+        if a.cmd == 'deploy':
+            return admin_release()
+        if a.cmd == 'logs':
+            return verb('vault-logs', str(max(1, min(int(a.n), 2000)))).returncode
+        if a.cmd == 'ps':
+            return verb('vault-ps').returncode
+        die(f'vault admin {a.cmd}: not mine any more since the SSH lockdown; owner: {LOCKED[a.cmd]}', 2)
+    if a.cmd == 'init':
+        return admin_init()
+    if a.cmd == 'env-add':
+        return admin_env_add(pairs)
+    if a.cmd == 'deploy':
+        return admin_deploy(build=not a.no_build)
+    if a.cmd == 'stage':
+        print(stage())
+        return 0
+    if a.cmd == 'test':
+        return admin_test()
+    if a.cmd == 'logs':
+        return ssh(f'docker logs --tail {int(a.n)} claude-vault 2>&1', check=False).returncode
+    if a.cmd == 'ps':
+        return ssh('docker ps -a --filter name=claude-vault --format "table {{.Names}}\\t{{.Status}}\\t{{.Image}}"; '
+                   'docker stats --no-stream --format "{{.Name}}: CPU {{.CPUPerc}}, RAM {{.MemUsage}}" claude-vault',
+                   check=False).returncode
+    if a.cmd == 'restart':
+        return ssh('docker restart claude-vault', check=False).returncode
+    if a.cmd == 'down':
+        return ssh(f'cd {REMOTE} && docker compose down', check=False).returncode
+    return admin_test_instance(a.action)
+
+
+# ============================================================================================ main
+
+def main(argv, client=None):
+    instance = 'prod'
+    if argv[:1] == ['--instance'] and len(argv) > 1:
+        instance, argv = argv[1], argv[2:]
+        if instance not in INSTANCE:
+            die('--instance must be prod or test', 2)
+    head = argv[:argv.index('--')] if '--' in argv else argv
+    async_mode = '--async' in head                     # anywhere before `--`
+    if async_mode:
+        i = argv.index('--async')
+        argv = argv[:i] + argv[i + 1:]
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        print(__doc__.strip())
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == 'admin':
+        return cmd_admin(rest)
+    c = client or Client(instance)
+    if cmd == 'health':
+        try:
+            with OPENER.open(c.url + '/health', timeout=5) as r:
+                print(r.read().decode())
+                return 0
+        except OSError as e:
+            die(f'vault unreachable at {c.url}: {getattr(e, "reason", e)}', 3)
+    handlers = {'status': cmd_status, 'tg': cmd_tg, 'paperless': cmd_paperless, 'firefly': cmd_firefly,
+                'llm-run': cmd_llm_run, 'raw': cmd_raw, 'audit': cmd_audit, 'alerts': cmd_alerts,
+                'secret': cmd_secret, 'events': cmd_events, 'gmail': cmd_gmail, 'media': cmd_media,
+                'metrics': cmd_metrics, 'job': cmd_job, 'facts': cmd_facts, 'find': cmd_find, 'plans': cmd_plans,
+                'ask': cmd_ask, 'ha': cmd_ha, 'people': cmd_people, 'index': cmd_index, 'deploy': cmd_deploy}
+    if cmd != 'media' and os.path.exists(MEDIA_STATE):     # released media: delete what is due (+ report it)
+        try:
+            media_gc(c, quiet=True)
+        except Exception:
+            pass
+    if cmd not in handlers:
+        die(f'unknown command {cmd!r} (vault --help)', 2)
+    if async_mode:
+        c.async_mode = True
+        c.async_argv = (['--instance', instance] if instance != 'prod' else []) + argv
+    return handlers[cmd](c, rest) or 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)

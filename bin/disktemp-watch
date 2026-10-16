@@ -1,0 +1,19 @@
+#!/bin/bash
+# disktemp-watch: temporary watch during the parity-2 sync (owner-approved).
+# Array HDDs only (NVMe pools run 60+ normally). Texts the owner when any array disk is >= LIMIT °C; at most once per 60 min. Expires at UNTIL.
+LIMIT=${LIMIT:-60}; UNTIL="2026-10-16 06:00"; ST=~/.local/state/disktemp-watch.last
+[ "$(date +%s)" -gt "$(date -d "$UNTIL" +%s)" ] && exit 0
+us=${UNRAID_SSH_BIN:-$HOME/bin/unraid-ssh}   # owner's SSH lockdown: the read-only `heat` verb (hddheat's collector)
+case $("$us" mode 2>/dev/null) in
+  verbs|emulate) out=$("$us" run heat 2>/dev/null | sed -n '/^=====HH disks$/,/^=====HH /p' |
+                       awk -F= '/^\[/{n=$0} /^temp=/{gsub(/["\[\]]/,"",n); gsub(/"/,"",$2); if ($2+0>0) print n, $2}') ;;
+  *) out=$(ssh -o ConnectTimeout=10 unraid 'awk -F= "/^\[/{n=\$0} /^temp=/{gsub(/[\"\[\]]/,\"\",n); gsub(/\"/,\"\",\$2); if (\$2+0>0) print n, \$2}" /var/local/emhttp/disks.ini' 2>/dev/null) || exit 0 ;;
+esac
+hot=$(echo "$out" | awk -v l="$LIMIT" '$1 ~ /^(disk|parity)/ && $2>=l {printf "%s %s°C, ", $1, $2}')
+[ "$1" = "--show" ] && { echo "$out"; echo "hot: ${hot:-none}"; exit 0; }
+[ -z "$hot" ] && exit 0
+last=$(cat "$ST" 2>/dev/null || echo 0); now=$(date +%s)
+[ $((now-last)) -lt 3600 ] && exit 0
+echo "$now" > "$ST"
+/usr/local/bin/tg "🔥 Disk temp ≥${LIMIT}°C during parity sync: ${hot%, }
+Check fans/airflow. (watch ends Fri 06:00)"

@@ -1,0 +1,14 @@
+#!/bin/bash
+# ecovacs-fix-watch: daily check whether the HA Ecovacs verification-loop fix (core PR 178558) is merged/released.
+# Writes one ~/inbox note when the state changes; removes itself from the crontab job list is manual (see JOBS.md).
+set -u
+state_f=~/.local/state/ecovacs-fix-watch.state
+mkdir -p ~/.local/state
+s=$(timeout 60 gh api repos/home-assistant/core/pulls/178558 --jq '"merged=\(.merged_at // "-") state=\(.state) milestone=\(.milestone.title // "-")"' 2>/dev/null) || exit 0
+[ -n "$s" ] || exit 0
+old=$(cat "$state_f" 2>/dev/null || true)
+if [ "$s" != "$old" ]; then
+  echo "$s" > "$state_f"
+  [ -z "$old" ] && exit 0
+  printf '# ecovacs-fix-watch\n\nHA core PR 178558 (Ecovacs verification-loop fix) changed: %s (was: %s).\nIf merged: tell the owner which HA release has it (milestone), then he updates HA and re-authenticates Ecovacs. If closed unmerged: check for a successor PR.\n' "$s" "$old" > ~/inbox/ecovacs-fix-watch-$(date +%Y%m%d-%H%M).md
+fi

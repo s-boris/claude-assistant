@@ -1,0 +1,867 @@
+#!/usr/bin/python3 -I
+"""channel-check: watchdog for the main session's Telegram line. Cron, every minute; costs no tokens.
+
+  channel-check              check once, act if needed (what cron runs)
+  channel-check --status     print what it sees (no actions)
+  channel-check --dry-run    decide, print the actions, change nothing
+
+Detects
+  not_delivered  Claude Code doesn't deliver channel messages: telegram-plus (>=0.1.5) reports it in
+                 health.json (gate skipped / notifications dropped); with an older plugin, the newest
+                 MCP log segment has "Channel notifications skipped: ..." or similar.
+  poller_down    no live poller (bot.pid not alive / not server.ts), or no successful getUpdates
+                 round-trip for 3 min.
+  stall          an owner message or button press (journal) is >3 min old, no Telegram tool call came
+                 after it, the session never saw it (not in the transcript), and the session is idle.
+                 First the plugin is asked to re-send it (replay-request.json, flagged redelivered);
+                 if it's still unseen 3 min later, restart.
+  long_wait      the same, >10 min, while the session is busy (blocked, usage limit, long tool call).
+  dialog         the session waits on a dialog while an owner message waits for it.
+  api_error      the session saw an owner message, but its turn died on a known fatal API error (FATAL_API:
+                 #101715 "safeguards flagged" / stop_reason refusal, #101181 "system content must contain at
+                 least one block"; a synthetic error entry in the transcript after the message) and it's idle.
+                 The plugin is asked to re-send it once; the same error after that: one short owner line.
+
+Acts
+  One short "⚠️ (auto)" owner notice per incident via `tg` (none if the plugin already alerted, or the
+  heartbeat already reported the dialog), and a "✅ (auto) back to normal" when it ends; quiet hours
+  (00-08) defer notices that no owner message triggered. A note in ~/inbox. `restart "auto-recover:
+  <why>"` only when inbound is dead and the session is idle, hung or gone, and a restart can help: at
+  most 1 per 15 min, 3 per 6 h, 2 per incident; past that it tells the owner it needs them. A busy
+  session is never restarted for a slow answer. The same incident within 30 min of its end: no new
+  notice. At most 6 owner messages per 6 h.
+
+State and log: ~/.local/state/channel-check/ (state.json, log).
+Testing: CC_STATE, CC_TG_DIR, CC_MCP_LOGS, CC_PROJECTS, CC_SESSIONS, CC_INBOX, CC_WORKSPACE override the
+paths; CC_AGENTS_JSON a file standing in for `claude agents --json`; CC_TG and CC_RESTART the commands;
+CC_STUCK_FLAG the heartbeat's dialog flag; CC_NOW the clock (epoch seconds); CC_QUIET the quiet hours
+("0-8", "" for none).
+"""
+import datetime, glob, json, os, re, subprocess, sys, time, zlib
+
+HOME = os.path.expanduser('~')
+E = os.environ.get
+STATE_DIR = E('CC_STATE') or os.path.join(HOME, '.local/state/channel-check')
+TG_DIR = E('CC_TG_DIR') or os.path.join(HOME, '.claude/channels/telegram')
+LOG_ROOT = E('CC_MCP_LOGS') or os.path.join(E('XDG_CACHE_HOME') or os.path.join(HOME, '.cache'), 'claude-cli-nodejs')
+PROJECTS = E('CC_PROJECTS') or os.path.join(HOME, '.claude/projects/-home-node-workspace')
+SESSIONS = E('CC_SESSIONS') or os.path.join(HOME, '.claude/sessions')
+INBOX = E('CC_INBOX') or os.path.join(HOME, 'inbox')
+WORKSPACE = E('CC_WORKSPACE') or os.path.join(HOME, 'workspace')
+TG_CMD = E('CC_TG') or 'tg'
+RESTART_CMD = E('CC_RESTART') or 'restart'
+AGENTS_JSON = E('CC_AGENTS_JSON')
+STUCK_FLAG = E('CC_STUCK_FLAG') or '/tmp/stuck'
+QUIET = E('CC_QUIET', '0-8')
+NOW = float(E('CC_NOW')) if E('CC_NOW') else time.time()
+
+STALL_S = 180            # unseen this long while idle: stalled
+LONG_WAIT_S = 600        # unseen this long while busy: long wait
+REPLAY_WAIT_S = 180      # after asking the plugin to re-send: wait this long before restarting
+POLL_STALE_S = 180       # no getUpdates round-trip for this long: poller stuck
+STARTING_S = 180         # a session younger than this is still starting
+HUNG_S = 1200            # busy with no transcript writes (incl. subagents) for this long: hung
+PERSIST_S = 50           # not_delivered / poller_down must hold this long (two runs) before acting
+RESTART_GAP_S = 900      # at most 1 auto-restart per 15 min
+RESTART_WINDOW_S = 6 * 3600
+RESTART_MAX = 3          # at most 3 per 6 h
+RESTART_PER_INCIDENT = 2
+REOPEN_QUIET_S = 1800    # the same incident again within 30 min of its end: no new notice
+NOTICE_WINDOW_S = 6 * 3600
+NOTICE_MAX = 6           # at most 6 owner messages per 6 h
+EVENT_HORIZON_S = 6 * 3600
+NO_VERDICT_S = 60        # connected this long without a channel verdict line: suspicious
+NO_VERDICT = 'no "Channel notifications registered" line in Claude Code\'s MCP log'
+LOG_DIR_NAMES = ('mcp-logs-plugin-telegram-plus-telegram', 'mcp-logs-plugin-telegram-telegram')
+CHANNEL_ERR = re.compile(r'Channel notifications skipped: .*|.*not on the approved channels allowlist.*'
+                         r'|.*[Cc]hannels are not (?:currently )?available.*')
+# Fatal API errors that end a turn with the owner's message unanswered (matched only in Claude Code's own
+# error entries, never in conversation text): (pattern, owner-readable cause, upstream issue).
+FATAL_API = ((re.compile(r'safeguards flagged', re.I), 'Opus safety filter false alarm', '#101715'),
+             (re.compile(r'system content must contain at least one block', re.I), 'broken request after a compaction', '#101181'))
+FATAL_PREFILTER = re.compile(rb'safeguards flagged|system content must contain|"stop_reason":"refusal"', re.I)
+# Gate skips a restart can fix (flags or policy not loaded yet, drops at delivery time); the
+# others (allowlist, policy, marketplace, --channels list, capability, era, provider) are config.
+RESTART_HELPS = {'disabled', 'dropped', 'other', 'unknown'}
+
+STATE_FILE = os.path.join(STATE_DIR, 'state.json')
+LOG_FILE = os.path.join(STATE_DIR, 'log')
+DRY = False
+
+
+# ---------------------------------------------------------------- small helpers
+
+def log(msg):
+    line = '%s %s' % (time.strftime('%F %T', time.localtime(NOW)), msg)
+    if DRY:
+        print('log:', msg)
+        return
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 256 * 1024:
+            with open(LOG_FILE, 'rb') as f:
+                f.seek(-128 * 1024, 2)
+                tail = f.read()
+            with open(LOG_FILE, 'wb') as f:
+                f.write(tail)
+        with open(LOG_FILE, 'a') as f:
+            f.write(line + '\n')
+    except OSError:
+        pass
+
+
+def load_json(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, data, mode=0o600):
+    tmp = '%s.tmp.%d' % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
+
+
+def parse_iso(s):
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
+
+
+def hhmm(ts):
+    return time.strftime('%H:%M', time.localtime(ts))
+
+
+def mins(sec):
+    return '%d min' % max(1, int(sec // 60))
+
+
+def quiet_now():
+    m = re.fullmatch(r'\s*(\d{1,2})-(\d{1,2})\s*', QUIET or '')
+    if not m:
+        return False
+    h, a, b = time.localtime(NOW).tm_hour, int(m.group(1)), int(m.group(2))
+    return a <= h < b if a <= b else (h >= a or h < b)
+
+
+def cmdline(pid):
+    try:
+        with open('/proc/%d/cmdline' % pid, 'rb') as f:
+            return [a.decode(errors='replace') for a in f.read().split(b'\0') if a]
+    except OSError:
+        return []
+
+
+def live_server(pid):
+    """Alive and really a server.ts (pid files race with pid reuse)."""
+    if not pid or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return 'server.ts' in ' '.join(cmdline(pid))
+
+
+def ppid(pid):
+    try:
+        with open('/proc/%d/stat' % pid, 'rb') as f:
+            return int(f.read().rsplit(b')', 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def claude_ancestor(pid):
+    p = ppid(pid)
+    for _ in range(8):
+        if p <= 1:
+            return None
+        argv = cmdline(p)
+        if argv and (os.path.basename(argv[0]) == 'claude' or '/claude/versions/' in argv[0]):
+            return p
+        p = ppid(p)
+    return None
+
+
+def skip_kind(reason):
+    """Claude Code's channel-gate skip reasons → a short kind (same mapping as telegram-plus)."""
+    r = reason.lower()
+    for needle, kind in (('feature is not currently available', 'disabled'), ('claude/channel capability', 'capability'),
+                         ('protocol revision', 'era'), ('third-party providers', 'provider'), ('org policy', 'policy'),
+                         ('--channels list', 'session'), ('you asked for plugin:', 'marketplace'),
+                         ('approved channels', 'allowlist'), ('channels are not available', 'disabled')):
+        if needle in r:
+            return kind
+    return 'other'
+
+
+def version_ge(v, want):
+    def parts(x):
+        return [int(n) for n in re.findall(r'\d+', str(x))[:3]] or [0]
+    return parts(v) >= parts(want)
+
+
+def tail_bytes(path, limit):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - limit))
+            data = f.read()
+        if size > limit:
+            data = data.split(b'\n', 1)[-1]
+        return data
+    except OSError:
+        return b''
+
+
+def fatal_api_error(o):
+    """(cause, issue) if this transcript entry is Claude Code's record of a FATAL_API error, else None. Only its
+    own error entries count (synthetic assistant messages "API Error: ...", system api_error entries, a
+    stop_reason "refusal"), so a conversation about these errors never matches."""
+    if not isinstance(o, dict):
+        return None
+    t, m = o.get('type'), o.get('message') if isinstance(o.get('message'), dict) else {}
+    if t == 'assistant' and m.get('stop_reason') == 'refusal':
+        return FATAL_API[0][1:]  # a safeguards stop (#101715; #101793 starts the same way)
+    if t == 'assistant' and (o.get('isApiErrorMessage') or m.get('model') == '<synthetic>'):
+        text = json.dumps(m.get('content'))
+    elif t == 'system' and (o.get('subtype') == 'api_error' or o.get('level') == 'error'):
+        text = json.dumps([o.get('content'), o.get('error')])
+    else:
+        return None
+    for rx, cause, issue in FATAL_API:
+        if rx.search(text):
+            return cause, issue
+    return None
+
+
+# ---------------------------------------------------------------- what is there
+
+class Ctx:
+    def __init__(self):
+        self.health = load_json(os.path.join(TG_DIR, 'health.json'))
+        self.holder, self.holder_plus = self._holder()
+        self.holder_alive = live_server(self.holder)
+        h = self.health
+        # health.json speaks for the bot only if its writer still holds bot.pid
+        self.plus = bool(isinstance(h, dict) and version_ge(h.get('version'), '0.1.5')
+                         and h.get('pid') == self.holder and self.holder_alive)
+        alert = load_json(os.path.join(TG_DIR, 'delivery-alert.json'))
+        self.plugin_alerted = bool(isinstance(alert, dict) and alert.get('sent')
+                                   and (parse_iso(alert.get('at')) or 0) > NOW - 24 * 3600)
+        self._log = None
+        self._agents = None
+        self._session = None
+        self._lines = None
+
+    def _holder(self):
+        try:
+            with open(os.path.join(TG_DIR, 'bot.pid')) as f:
+                lines = f.read().split('\n')
+            return int(lines[0].strip()), (len(lines) > 1 and lines[1].strip() == 'telegram-plus')
+        except (OSError, ValueError):
+            return 0, False
+
+    @property
+    def log_file(self):
+        return self.log_scan()[0]
+
+    @property
+    def log_error(self):
+        return self.log_scan()[1]
+
+    def log_scan(self):
+        if self._log is None:
+            self._log = self._log_error()
+        return self._log
+
+    def _log_error(self):
+        """Newest telegram MCP log; a channel error in its last connection segment, unless a
+        later line in that segment says the channel was registered."""
+        files = []
+        for name in LOG_DIR_NAMES:
+            files += glob.glob(os.path.join(LOG_ROOT, '*', name, '*.jsonl'))
+        if not files:
+            return None, None
+        newest = max(files, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+        msgs = []
+        for raw in tail_bytes(newest, 2 << 20).split(b'\n'):
+            try:
+                o = json.loads(raw)
+            except ValueError:
+                continue
+            m = o.get('debug') or o.get('error')
+            if isinstance(m, str):
+                msgs.append((m, parse_iso(o.get('timestamp'))))
+        start = max([i for i, (m, _) in enumerate(msgs) if m.startswith('Starting connection')] or [0])
+        err, verdict, connected = None, False, None
+        for m, t in msgs[start:]:
+            if m == 'Channel notifications registered' or 'preserving handler' in m:
+                err, verdict = None, True
+            elif CHANNEL_ERR.fullmatch(m):
+                err, verdict = m, True
+            elif m.startswith('Successfully connected'):
+                connected = t
+        if not verdict and connected and NOW - connected > NO_VERDICT_S:
+            # Claude Code logs one of these at every connect; none at all is suspicious
+            # (it changed its log, or the gate never ran): say so once, don't restart.
+            err = NO_VERDICT
+        return newest, err
+
+    def journal(self):
+        out = []
+        try:
+            with open(os.path.join(TG_DIR, 'inbound-journal.jsonl')) as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(e, dict) and e.get('id'):
+                        out.append(e)
+        except OSError:
+            pass
+        return out
+
+    def agents(self):
+        if self._agents is None:
+            try:
+                if AGENTS_JSON:
+                    with open(AGENTS_JSON) as f:
+                        raw = f.read()
+                else:
+                    raw = subprocess.run(['claude', 'agents', '--json'], capture_output=True, text=True,
+                                         timeout=30).stdout
+                data = json.loads(raw or '[]')
+                self._agents = data if isinstance(data, list) else []
+            except (OSError, ValueError, subprocess.SubprocessError):
+                self._agents = []
+        return self._agents
+
+    def session(self):
+        """(state, entry): state is idle | busy | hung | waiting | starting | absent."""
+        if self._session is None:
+            cands = [a for a in self.agents() if isinstance(a, dict) and a.get('cwd') == WORKSPACE]
+            s = None
+            if cands:
+                anc = claude_ancestor(self.holder) if self.holder_alive else None
+                s = next((a for a in cands if anc and a.get('pid') == anc), None)
+                s = s or next((a for a in cands if a.get('kind') == 'interactive'), None) or cands[0]
+            log('session (claude agents): %s' % (json.dumps({k: s.get(k) for k in ('pid', 'status', 'waitingFor', 'kind')}) if s else 'none'))
+            if not s:
+                self._session = ('absent', None)
+            elif (s.get('startedAt') or 0) / 1000 > NOW - STARTING_S:
+                self._session = ('starting', s)
+            elif s.get('status') == 'waiting':
+                self._session = ('waiting', s)
+            elif s.get('status') == 'busy':
+                self._session = ('hung' if self._hung(s) else 'busy', s)
+            else:
+                self._session = ('idle', s)
+        return self._session
+
+    def _hung(self, s):
+        reg = load_json(os.path.join(SESSIONS, '%s.json' % s.get('pid')), {}) or {}
+        since = (reg.get('statusUpdatedAt') or 0) / 1000
+        if not since or since > NOW - HUNG_S:
+            return False
+        newest = 0
+        for root, dirs, files in os.walk(PROJECTS):
+            if root[len(PROJECTS):].count(os.sep) >= 3:
+                dirs[:] = []
+            for name in files:
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, name)))
+                except OSError:
+                    pass
+        return newest < NOW - HUNG_S
+
+    def transcript(self):
+        _, s = self.session()
+        if s and s.get('sessionId'):
+            p = os.path.join(PROJECTS, '%s.jsonl' % s['sessionId'])
+            if os.path.exists(p):
+                return p
+        files = glob.glob(os.path.join(PROJECTS, '*.jsonl'))
+        return max(files, key=os.path.getmtime) if files else None
+
+    def seen(self, events):
+        """Journal ids of events the session has in its context (a user or attachment entry in the
+        transcript carrying the event's message_id and ts). None if there's no transcript."""
+        found = self.delivered(events)
+        return None if found is None else set(found)
+
+    def tail_lines(self):
+        """The transcript's last 8 MB as lines (read once per run); None if there's no transcript."""
+        if self._lines is None:
+            path = self.transcript()
+            self._lines = tail_bytes(path, 8 << 20).split(b'\n') if path else False
+        return self._lines or None
+
+    def delivered(self, events):
+        """{journal id: index of its newest user/attachment entry in tail_lines()}; None without a transcript."""
+        lines = self.tail_lines()
+        if lines is None:
+            return None
+        found = {}
+        for e in events:
+            mid, ts = e.get('message_id'), e.get('ts')
+            if not mid or not ts:
+                continue
+            k1 = ('message_id=\\"%s\\"' % mid).encode()
+            k2 = ('ts=\\"%s\\"' % ts).encode()
+            for i in range(len(lines) - 1, -1, -1):
+                line = lines[i]
+                if k1 in line and k2 in line:
+                    try:
+                        if json.loads(line).get('type') in ('user', 'attachment'):
+                            found[e['id']] = i
+                            break
+                    except ValueError:
+                        pass
+        return found
+
+    def api_errors(self, events):
+        """{journal id: (cause, issue, key)} for events with a FATAL_API error entry after their newest delivery
+        (the last such entry; key tells a new error from one already handled)."""
+        at = self.delivered(events)
+        if not at:
+            return {}
+        lines = self.tail_lines()
+        errs = []
+        for i in range(min(at.values()) + 1, len(lines)):
+            if FATAL_PREFILTER.search(lines[i]):
+                try:
+                    o = json.loads(lines[i])
+                except ValueError:
+                    continue
+                hit = fatal_api_error(o)
+                if hit:
+                    errs.append((i, hit, str(o.get('uuid') or o.get('timestamp') or zlib.crc32(lines[i]))))
+        out = {}
+        for eid, idx in at.items():
+            after = [(hit, key) for i, hit, key in errs if i > idx]
+            if after:
+                out[eid] = after[-1][0] + (after[-1][1],)
+        return out
+
+
+# ---------------------------------------------------------------- acting
+
+class Actor:
+    def __init__(self, st):
+        self.st = st
+
+    def tg(self, text):
+        sent = [t for t in self.st['sent'] if t > NOW - NOTICE_WINDOW_S]
+        if len(sent) >= NOTICE_MAX:
+            log('owner message suppressed (cap %d per 6 h): %s' % (NOTICE_MAX, text))
+            return False
+        if DRY:
+            print('tg:', text)
+            return True
+        try:
+            ok = subprocess.run([TG_CMD, text], capture_output=True, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if ok:
+            sent.append(NOW)
+        self.st['sent'] = sent
+        log('owner message %s: %s' % ('sent' if ok else 'FAILED', text))
+        return ok
+
+    def note(self, kind, text):
+        path = os.path.join(INBOX, 'channel-%s-%d.md' % (kind, int(NOW)))
+        if DRY:
+            print('note %s:' % os.path.basename(path), text)
+            return path
+        try:
+            os.makedirs(INBOX, exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(text.rstrip() + '\n')
+            log('inbox note %s' % os.path.basename(path))
+        except OSError as e:
+            log('inbox note failed: %s' % e)
+        return path
+
+    def restart(self, why):
+        reason = 'auto-recover: %s' % why
+        if DRY:
+            print('restart:', reason)
+            return True
+        try:
+            ok = subprocess.run([RESTART_CMD, reason], capture_output=True, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        log('restart %s: %s' % ('started' if ok else 'FAILED', reason))
+        return ok
+
+    def replay(self, ids, why):
+        path = os.path.join(TG_DIR, 'replay-request.json')
+        if DRY:
+            print('replay:', ids)
+            return
+        prev = load_json(path, {}) or {}
+        ids = list(dict.fromkeys(list(prev.get('ids') or []) + list(ids)))
+        save_json(path, {'ids': ids, 'reason': why, 'at': datetime.datetime.fromtimestamp(NOW).astimezone().isoformat()})
+        log('asked the plugin to re-send %s (%s)' % (', '.join(ids), why))
+
+
+class Watchdog:
+    def __init__(self, st, ctx):
+        self.st, self.c, self.act = st, ctx, Actor(st)
+
+    # -- incidents
+    def open(self, kind, detail, notice, owner_triggered=False, by_plugin=False, note=''):
+        inc = self.st['incidents'].get(kind)
+        if inc:
+            inc['detail'] = detail
+            if inc.get('deferred') and not quiet_now():
+                inc['deferred'] = False
+                inc['notified'] = self.act.tg(inc.get('notice') or notice)
+            return inc
+        inc = {'opened': NOW, 'detail': detail, 'notified': False, 'restarts': 0}
+        self.st['incidents'][kind] = inc
+        recently = NOW - self.st['resolved'].get(kind, 0) < REOPEN_QUIET_S
+        if by_plugin:
+            inc['by_plugin'] = True
+            log('%s: the plugin already told the owner' % kind)
+        elif recently:
+            log('%s: back within 30 min of its end; no new notice' % kind)
+        elif quiet_now() and not owner_triggered:
+            inc['deferred'], inc['notice'] = True, notice
+            log('%s: quiet hours, notice deferred' % kind)
+        else:
+            inc['notified'] = self.act.tg(notice)
+        log('incident %s opened: %s' % (kind, detail))
+        inc['note'] = self.act.note(kind, note or '%s: %s' % (kind, detail))
+        return inc
+
+    def resolve(self, kind, what):
+        inc = self.st['incidents'].pop(kind, None)
+        if not inc:
+            return
+        self.st['resolved'][kind] = NOW
+        log('incident %s resolved after %s' % (kind, mins(NOW - inc['opened'])))
+        if inc.get('notified'):
+            self.act.tg('✅ (auto) Back to normal: %s' % what)
+        note = inc.get('note')
+        if note and os.path.exists(note) and not DRY:
+            try:
+                with open(note, 'a') as f:
+                    f.write('\nResolved by itself at %s.\n' % hhmm(NOW))
+            except OSError:
+                pass
+
+    def persistent(self, key, cond):
+        p = self.st['pending']
+        if not cond:
+            p.pop(key, None)
+            return False
+        p.setdefault(key, NOW)
+        return NOW - p[key] >= PERSIST_S
+
+    # -- restarts
+    def try_restart(self, kind, why, helpful=True):
+        """Restart when it's safe and could help. Returns what happened, for the notes."""
+        inc = self.st['incidents'].get(kind) or {}
+        if not helpful:
+            return 'no restart: a restart would not fix this'
+        state, _ = self.c.session()
+        if state not in ('idle', 'hung', 'absent'):
+            return 'no restart: session %s' % state
+        recent = [t for t in self.st['restarts'] if t > NOW - RESTART_WINDOW_S]
+        self.st['restarts'] = recent
+        if inc.get('restarts', 0) >= RESTART_PER_INCIDENT or len(recent) >= RESTART_MAX:
+            self.limit_reached(why)
+            return 'no restart: limit reached'
+        if recent and NOW - recent[-1] < RESTART_GAP_S:
+            return 'no restart: the last one was %s ago' % mins(NOW - recent[-1])
+        if not self.act.restart(why):
+            return 'restart failed'
+        recent.append(NOW)
+        if inc:
+            inc['restarts'] = inc.get('restarts', 0) + 1
+        return 'restarted (%s session)' % state
+
+    def limit_reached(self, why):
+        last = self.st.get('limit_notified', 0)
+        if last > NOW - RESTART_WINDOW_S:
+            return
+        self.st['limit_notified'] = NOW
+        self.act.tg('⚠️ (auto) Telegram is still broken after automatic restarts (%s). '
+                    'I\'ve stopped restarting; it needs you. Remote Control still reaches me.' % why)
+        self.act.note('restart-limit', 'Auto-restart limit reached (%d per 6 h, %d per incident). Still broken: %s.\n'
+                      'Fix it by hand; ~/.local/state/channel-check/log has the history.' % (RESTART_MAX, RESTART_PER_INCIDENT, why))
+
+    # -- checks
+    def run(self):
+        c, h = self.c, self.c.health if self.c.plus else None
+
+        # Inbound path: does Claude Code take our notifications, and is anyone polling?
+        nd = None
+        d = (h or {}).get('delivery') or {}
+        if d.get('state') == 'blocked':
+            nd = (d.get('kind') or 'other', d.get('reason') or 'blocked')
+        elif (not h or d.get('state') in ('unknown', 'pending')) and c.log_error:
+            # an older plugin, or 0.1.5 without a verdict of its own: read Claude Code's log
+            m = re.search(r'Channel notifications skipped: (.*)', c.log_error)
+            reason = m.group(1) if m else c.log_error
+            nd = ('no_verdict' if reason == NO_VERDICT else skip_kind(reason), reason)
+        pd = None
+        if not c.holder_alive:
+            pd = 'no live Telegram poller (bot.pid %s)' % (c.holder or 'missing')
+        elif h and h.get('poll_role') == 'poll':
+            ref = parse_iso(h.get('last_poll_ok')) or parse_iso(h.get('started_at'))
+            if ref and NOW - ref > POLL_STALE_S:
+                pd = 'no successful getUpdates for %s' % mins(NOW - ref)
+
+        if self.persistent('not_delivered', nd is not None):
+            kind, reason = nd
+            held = d.get('state') == 'blocked'  # 0.1.5 stopped polling: Telegram keeps the messages
+            if kind == 'no_verdict':
+                text = ('⚠️ (auto) I can\'t confirm your Telegram messages reach me (Claude Code\'s log shows no channel '
+                        'registration). If I don\'t answer, reach me via Remote Control.')
+                advice = ('Claude Code logged no channel verdict for this connection ("Channel notifications registered" '
+                          'or "...skipped: <reason>"). Maybe its log format changed: check that inbound works, then update '
+                          'ops/channel-check (and the telegram-plus delivery guard) to the new lines. No auto-restart.')
+            else:
+                text = ('⚠️ (auto) Your Telegram messages aren\'t reaching me right now (%s). %s Reach me via Remote Control meanwhile.'
+                        % (reason, 'Telegram keeps them until it works again.' if held else 'Messages sent meanwhile may be lost.'))
+                advice = ('This is config (allowlist/policy/--channels/marketplace): fix it, then restart.'
+                          if kind not in RESTART_HELPS else 'A restart may fix it; the watchdog tries (rate-limited).')
+            inc = self.open('not_delivered', '%s: %s' % (kind, reason), text, by_plugin=c.plugin_alerted,
+                            note='Telegram inbound is broken: Claude Code doesn\'t deliver channel messages (%s: %s).\n'
+                                 'Plugin: %s. Log: %s.\n%s'
+                                 % (kind, reason, 'telegram-plus %s' % h.get('version') if h else 'pre-0.1.5 or no valid health.json',
+                                    c.log_file or '-', advice))
+            r = self.try_restart('not_delivered', 'Claude Code isn\'t delivering Telegram messages (%s)' % kind,
+                                 helpful=kind in RESTART_HELPS)
+            if r != inc.get('last_action'):
+                inc['last_action'] = r
+                log('not_delivered: %s' % r)
+        elif nd is None:
+            self.resolve('not_delivered', 'your Telegram messages reach me again.')
+
+        if nd is None and self.persistent('poller_down', pd is not None):
+            state, _ = c.session()
+            if state == 'starting':
+                self.st['pending']['poller_down'] = NOW  # give a fresh session time to connect
+            else:
+                text = ('⚠️ (auto) My Telegram connection is down (%s). Your messages wait at Telegram '
+                        '(up to 24 h); I\'m trying to recover. Remote Control works meanwhile.' % pd)
+                inc = self.open('poller_down', pd, text,
+                                note='Telegram poller down: %s.\nbot.pid=%s (alive: %s), health: %s.'
+                                     % (pd, c.holder or '-', c.holder_alive,
+                                        json.dumps({k: (h or {}).get(k) for k in ('pid', 'poll_role', 'last_poll_ok', 'version')})))
+                r = self.try_restart('poller_down', 'Telegram poller down: %s' % pd)
+                if r != inc.get('last_action'):
+                    inc['last_action'] = r
+                    log('poller_down: %s' % r)
+        elif pd is None:
+            self.resolve('poller_down', 'my Telegram connection works again.')
+
+        self.owner_events(h)
+
+        # Deferred notices go out when the quiet hours end.
+        if not quiet_now():
+            for kind, inc in self.st['incidents'].items():
+                if inc.get('deferred'):
+                    inc['deferred'] = False
+                    inc['notified'] = self.act.tg(inc.get('notice') or '⚠️ (auto) Telegram trouble: %s' % inc['detail'])
+
+    def api_failures(self, unanswered, h):
+        """Seen owner events whose turn died on a FATAL_API error while the session sits idle: ask the plugin to
+        re-send each once; a new such error after that re-send: one short owner line and a note. Returns the
+        ids the owner was told about (no 'unanswered' note for those)."""
+        book = self.st['api_errors']
+        hits = self.c.api_errors([e for _, e in unanswered])
+        can_replay = h.get('poll_role') == 'poll' and (h.get('delivery') or {}).get('state') in ('ok', 'unknown')
+        for at, e in unanswered:
+            hit, b = hits.get(e['id']), book.get(e['id'])
+            if not hit or (b and (b.get('told') or hit[2] == b.get('key'))):
+                continue  # no error, already told, or the re-send hasn't run into anything new yet
+            cause, issue, key = hit
+            if not b:
+                if not can_replay:
+                    log('message %s from %s: API error (%s %s), but the plugin can\'t re-send now' % (e['id'], hhmm(at), issue, cause))
+                    continue
+                book[e['id']] = {'at': NOW, 'key': key, 'issue': issue}
+                log('message %s from %s: the turn died on an API error (%s %s); re-sending it once' % (e['id'], hhmm(at), issue, cause))
+                self.act.replay([e['id']], 'API error %s' % issue)
+                continue
+            b['told'], b['key'] = NOW, key
+            log('message %s from %s: API error again after the re-send (%s %s); telling the owner' % (e['id'], hhmm(at), issue, cause))
+            self.act.tg('⚠️ (auto) Your message from %s failed twice on an API error (%s). Please rephrase it '
+                        'or use Remote Control.' % (hhmm(at), cause))
+            self.act.note('apierror', 'The owner\'s Telegram %s from %s (message_id %s) hit a fatal API error twice, once more '
+                          'after a re-send: %s (%s, Claude Code bug). The owner was told to rephrase it or use Remote Control.'
+                          '\n\n%s\n\nIf it\'s %s, the session may stay broken until fixed; check the transcript.'
+                          % (e.get('kind'), hhmm(at), e.get('message_id'), cause, issue, (e.get('content') or '')[:500], FATAL_API[1][2]))
+        return {i for i, b in book.items() if b.get('told')}
+
+    def owner_events(self, h):
+        """Owner messages/button presses that no Telegram tool call answered."""
+        kinds = ('stall', 'long_wait', 'dialog')
+        if not h:
+            for k in kinds:
+                self.resolve(k, 'your messages reach me again.')
+            return
+        ltc = parse_iso((h.get('last_tool_call') or {}).get('at')) or 0
+        pending = []
+        for e in self.c.journal():
+            at = parse_iso(e.get('at'))
+            if (e.get('owner') and e.get('kind') in ('message', 'button') and e.get('status') != 'dropped'
+                    and at and at > ltc and NOW - EVENT_HORIZON_S < at <= NOW - STALL_S):
+                pending.append((at, e))
+        if not pending:
+            for k in kinds:
+                self.resolve(k, 'your messages reach me again.')
+            return
+        state, _ = self.c.session()
+        seen = self.c.seen([e for _, e in pending])
+        if seen is None:
+            log('owner messages pending but no transcript to check; doing nothing')
+            return
+        unseen = [(at, e) for at, e in pending if e['id'] not in seen]
+        unanswered = [(at, e) for at, e in pending if e['id'] in seen]
+
+        told = self.api_failures(unanswered, h) if state == 'idle' and unanswered else set()
+
+        # Seen but never answered on Telegram: a note for me, nothing for the owner.
+        noted = self.st['noted']
+        for at, e in unanswered:
+            if state == 'idle' and NOW - at >= LONG_WAIT_S and e['id'] not in noted and e['id'] not in told:
+                noted[e['id']] = NOW
+                self.act.note('unanswered', 'The owner\'s Telegram %s from %s (message_id %s) reached the session but got no '
+                              'Telegram reply or reaction:\n\n%s\n\nAnswer it with the reply tool.'
+                              % (e.get('kind'), hhmm(at), e.get('message_id'), (e.get('content') or '')[:500]))
+
+        if not unseen:
+            for k in kinds:
+                self.resolve(k, 'your messages reach me again.')
+            return
+        if state == 'starting':
+            return  # a fresh session: give it a moment
+        first = min(at for at, _ in unseen)
+        when = hhmm(first)
+        ids = [e['id'] for _, e in unseen]
+
+        if state == 'waiting':
+            _, s = self.c.session()
+            what = (s or {}).get('waitingFor') or 'dialog'
+            self.open('dialog', 'waiting on a %s' % what,
+                      '⚠️ (auto) I\'m stuck on a %s, so your message from %s is waiting. Answer it in Remote Control '
+                      '(or docker exec -it claude-bot tmux attach).' % (what, when),
+                      owner_triggered=True, by_plugin=os.path.exists(STUCK_FLAG),
+                      note='Session waiting on a %s; the owner\'s message from %s is waiting behind it.' % (what, when))
+            return
+        self.resolve('dialog', 'I\'m past the dialog.')
+
+        if state in ('idle', 'hung', 'absent'):
+            asked = self.st['replays']
+            fresh = [i for i in ids if i not in asked]
+            can_replay = h.get('poll_role') == 'poll' and (h.get('delivery') or {}).get('state') in ('ok', 'unknown')
+            if fresh and can_replay and 'stall' not in self.st['incidents']:
+                for i in fresh:
+                    asked[i] = NOW
+                self.act.replay(fresh, 'stalled')
+                return
+            if can_replay and any(NOW - asked.get(i, 0) < REPLAY_WAIT_S for i in ids):
+                return  # give the re-send time to work
+            inc = self.open('stall', 'message from %s never reached the session (%s)' % (when, state),
+                            '⚠️ (auto) Your message from %s didn\'t reach me. I\'m restarting my session to recover it.' % when,
+                            owner_triggered=True,
+                            note='The owner\'s Telegram message(s) from %s never reached the session (not in the transcript, '
+                                 'session %s). Re-send requested; restarting.' % (when, state))
+            for i in ids:
+                asked[i] = NOW
+            self.act.replay(ids, 'stalled, restarting')
+            r = self.try_restart('stall', 'the owner\'s Telegram message from %s never reached the session' % when)
+            if r != inc.get('last_action'):
+                inc['last_action'] = r
+                log('stall: %s' % r)
+            return
+
+        # busy: never restart for a slow answer; tell the owner once after 10 min
+        if NOW - first >= LONG_WAIT_S:
+            self.open('long_wait', 'message from %s unread for %s (session busy)' % (when, mins(NOW - first)),
+                      '⚠️ (auto) Your message from %s is still waiting: I\'ve been busy for %s with something that hasn\'t '
+                      'let me read it yet. I\'ll answer as soon as it finishes; Remote Control if it\'s urgent.'
+                      % (when, mins(NOW - first)), owner_triggered=True,
+                      note='The owner\'s message from %s is unread after %s; the session is busy (blocked? usage limit? '
+                           'a long tool call?).' % (when, mins(NOW - first)))
+
+
+# ---------------------------------------------------------------- entry points
+
+def load_state():
+    st = load_json(STATE_FILE, {}) or {}
+    for k, v in (('incidents', {}), ('resolved', {}), ('pending', {}), ('restarts', []), ('sent', []),
+                 ('replays', {}), ('noted', {}), ('api_errors', {})):
+        if not isinstance(st.get(k), type(v)):
+            st[k] = v
+    # forget old bookkeeping
+    for k in ('replays', 'noted'):
+        st[k] = {i: t for i, t in st[k].items() if t > NOW - 2 * EVENT_HORIZON_S}
+    st['api_errors'] = {i: b for i, b in st['api_errors'].items()
+                        if isinstance(b, dict) and (b.get('at') or 0) > NOW - 2 * EVENT_HORIZON_S}
+    return st
+
+
+def status(ctx):
+    h = ctx.health or {}
+    print('plugin:      %s' % ('telegram-plus %s (health.json valid)' % h.get('version') if ctx.plus
+                               else 'no valid health.json (pre-0.1.5 or not running)'))
+    print('bot.pid:     %s (%s%s)' % (ctx.holder or '-', 'alive' if ctx.holder_alive else 'NOT alive',
+                                      ', telegram-plus' if ctx.holder_plus else ''))
+    if ctx.plus:
+        d = h.get('delivery') or {}
+        print('delivery:    %s%s (channels_accepted: %s)' % (d.get('state'), ' / %s: %s' % (d.get('kind'), d.get('reason')) if d.get('kind') else '', h.get('channels_accepted')))
+        print('poll role:   %s, last getUpdates %s' % (h.get('poll_role'), h.get('last_poll_ok')))
+        print('last owner:  %s' % json.dumps(h.get('last_inbound')))
+        print('last tool:   %s' % json.dumps(h.get('last_tool_call')))
+    print('MCP log:     %s%s' % (ctx.log_file or '-', ' (error: %s)' % ctx.log_error if ctx.log_error else ''))
+    st = load_state()
+    print('incidents:   %s' % (json.dumps(st['incidents']) if st['incidents'] else 'none'))
+    print('api errors:  %s' % (json.dumps(st['api_errors']) if st['api_errors'] else 'none'))
+    print('restarts:    %s' % (', '.join(time.strftime('%F %T', time.localtime(t)) for t in st['restarts'][-5:]) or 'none'))
+
+
+def main():
+    global DRY
+    args = sys.argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__.strip())
+        return 0
+    DRY = '--dry-run' in args
+    ctx = Ctx()
+    if '--status' in args:
+        status(ctx)
+        return 0
+    os.makedirs(STATE_DIR, exist_ok=True)
+    st = load_state()
+    try:
+        Watchdog(st, ctx).run()
+    finally:
+        if not DRY:
+            save_json(STATE_FILE, st)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except Exception as e:  # never die silently under cron
+        import traceback
+        log('ERROR %s: %s' % (type(e).__name__, traceback.format_exc().strip().splitlines()[-1]))
+        raise

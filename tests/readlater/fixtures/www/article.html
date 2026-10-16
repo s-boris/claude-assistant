@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>How MoE routing really works | Example Science</title>
+<meta property="og:title" content="How MoE routing really works">
+<meta property="og:site_name" content="Example Science">
+<meta name="author" content="Ada Muster">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"NewsArticle","headline":"How MoE routing really works","author":{"@type":"Person","name":"Ada Muster"},"datePublished":"2026-09-30","isAccessibleForFree":true}</script>
+</head><body>
+<nav><a href="/">Home</a> <a href="/news">News</a> <a href="/about">About us</a> <a href="/login">Log in</a></nav>
+<div class="cookie">We use cookies. <button>Accept</button></div>
+<main><article><h1>How MoE routing really works</h1>
+<p class="byline">By Ada Muster, 30 September 2026</p>
+<p>Mixture-of-experts models route every token to a small subset of specialised feed-forward networks, the experts. A learned router scores all experts and keeps the best two, so compute per token stays flat while the parameter count grows.</p>
+<p>The trick only works if the load is balanced. Without an auxiliary loss, the router collapses onto a few favourite experts and the rest never learn. Modern recipes add a small balancing term or use expert-choice routing, where experts pick tokens instead.</p>
+<p>In Zürich, a team measured routing entropy across layers and found that early layers route almost uniformly while late layers specialise sharply on syntax, numbers and code. They argue that this is why pruning late experts hurts most.</p>
+<p>For people running models at home, the practical upshot is memory: all experts must sit in RAM or VRAM even though only two run per token. Quantisation to four bits makes a 47-billion-parameter model fit on a single consumer GPU with offloading.</p>
+<p>The authors close with a warning about benchmarks: routing behaviour on synthetic prompts differs from real chat traffic, so evaluations should use logged, anonymised conversations where possible.</p>
+</article></main>
+<footer><p>Copyright 2026 Example Science. All rights reserved. Imprint. Privacy.</p>
+<ul><li><a href="/a">Related: GPUs at home</a></li><li><a href="/b">Related: quantisation</a></li></ul></footer>
+</body></html>

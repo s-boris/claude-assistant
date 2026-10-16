@@ -1,0 +1,643 @@
+#!/usr/bin/python3 -I
+"""recall: fast local search over my own past work (notes, reports, memory, chat transcripts).
+
+  recall "query" [--since YYYY-MM-DD] [--src md|chat|all] [-n 10] [--by-date] [--raw]
+        ranked hits, one line each: #ID date where snippet (n capped at 40)
+  recall --show ID [-C K]   full text of hit #ID (+K neighbouring chunks of the same file)
+  recall --index [--cron]   incremental index update (nightly cron 03:31; --cron: ~/inbox note on failure)
+  recall --rebuild          drop the index and rebuild from scratch
+  recall --stats            index size and age
+Query: plain words (question words like what/when/did are dropped), "exact phrase", prefix*.
+All words must match first; if that finds too little, hits with only some of the words follow.
+--raw passes the query to SQLite FTS5 MATCH as is (AND/OR/NOT/NEAR).
+
+Sources: ~/workspace/*.md, ~/reports/**/*.md, auto-memory *.md, and the main session's transcripts
+(~/.claude/projects/-home-node-workspace/*.jsonl): owner messages (terminal + Telegram, button presses,
+reactions), my text blocks and my Telegram reply texts, subagent results. Never tool results, thinking or blobs.
+Privacy: every chunk goes through secretscan.redact() before it is stored (fail-closed: no secretscan, no index).
+Never read: ~/.secrets, ~/.local/state/context/* (signals.json; old telegram.md, signals.md, location.json), any path with
+"vault" in it, the index itself; symlinks are checked after resolving. Index: SQLite FTS5 in
+~/.local/state/recall/index.db (0600, dir 0700). A query refreshes it first if it is older than 30 min.
+Env (tests): RECALL_HOME (source root), RECALL_STATE, RECALL_NOW (epoch secs), RECALL_SECRETSCAN_DIR,
+SECRETSCAN_SOURCES.
+"""
+import argparse
+import fcntl
+import glob
+import hashlib
+import html
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+os.umask(0o077)
+sys.path.insert(0, os.environ.get("RECALL_SECRETSCAN_DIR") or os.path.dirname(os.path.realpath(__file__)))
+try:
+    import secretscan  # noqa: E402
+except Exception:  # fail-closed: indexing refuses to run without it
+    secretscan = None
+
+TZ = ZoneInfo("Europe/Zurich")
+HOME = os.path.realpath(os.environ.get("RECALL_HOME") or os.path.expanduser("~"))
+STATE = os.environ.get("RECALL_STATE") or os.path.join(HOME, ".local/state/recall")
+DB = os.path.join(STATE, "index.db")
+PROJECT = os.path.join(HOME, ".claude/projects/-home-node-workspace")
+INBOX = os.path.join(HOME, "inbox")
+SCHEMA = "1"
+STALE_SECS = 30 * 60
+MAX_MD_BYTES = 2 * 1024 * 1024
+CHUNK = 1200
+SNIP = 200
+MAX_HITS = 40
+DENY_DIRS = (".secrets", ".ssh", ".local/state/context", ".local/state/recall", ".claude/channels")
+DENY_NAMES = ("telegram.md", "signals.md", "location.json", "signals.json")
+
+STOP = set("""what when where which who whom whose why how did do does done doing we i me my mine you your us our
+ours the a an about of to in on at for from by is are was were be been being and or with that this these those it
+its decide decided decision decisions regarding re again last time ever any there have has had can could would
+should will shall please tell find search remember recall wann wie wo wer warum wir ich mir mein der die das den
+dem des und oder über ueber haben hat habe hatte ein eine einen einem einer ist sind war waren zu im mit von für
+fuer""".split())
+
+DATE_RE = re.compile(r"\b(20\d\d-[01]\d-[0-3]\d)(?:[ T]([0-2]\d:[0-5]\d))?")
+LEAD_DATE_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?(?:\*\*)?\(?"
+                          r"(20\d\d-[01]\d-[0-3]\d)(?:[ T]([0-2]\d:[0-5]\d))?")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)")
+ITEM_RE = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
+BLOB_RE = re.compile(r"[A-Za-z0-9+/_=-]{160,}")
+SYSREM_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+CHANNEL_RE = re.compile(r'<channel((?:\s+[\w-]+="[^"]*")*)\s*>(.*?)(?:</channel>|$)', re.S)
+ATTR_RE = re.compile(r'([\w-]+)="([^"]*)"')
+TAG_RE = re.compile(r"<(summary|result)>(.*?)</\1>", re.S)
+TYPE_RE = re.compile(rb'"type"\s*:\s*"(?:user|assistant)"')
+SKIP_PREFIX = ("[heartbeat]", "The heartbeat plugin sent a message:", "[self-scheduled", "<local-command-",
+               "<command-name>", "<command-message>", "<command-args>", "[Image:", "Caveat:",
+               "[Request interrupted", "This session is being continued")
+
+
+def die(msg, code=2):
+    print("recall: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def now():
+    return float(os.environ.get("RECALL_NOW") or time.time())
+
+
+# ------------------------------------------------------------------ sources
+
+def allowed(p):
+    for q in {os.path.abspath(p), os.path.realpath(p)}:
+        rel = os.path.relpath(q, HOME)
+        if rel == ".." or rel.startswith(".." + os.sep):
+            return False
+        if any("vault" in part.lower() for part in rel.split(os.sep)):
+            return False
+        if any(rel == d or rel.startswith(d + os.sep) for d in DENY_DIRS):
+            return False
+        if os.path.basename(q) in DENY_NAMES:
+            return False
+    return True
+
+
+def sources():
+    md = (sorted(glob.glob(os.path.join(HOME, "workspace", "*.md")))
+          + sorted(glob.glob(os.path.join(HOME, "reports", "**", "*.md"), recursive=True))
+          + sorted(glob.glob(os.path.join(PROJECT, "memory", "*.md"))))
+    chat = sorted(glob.glob(os.path.join(PROJECT, "*.jsonl")))
+    out, seen = [], set()
+    for src, paths in (("md", md), ("chat", chat)):
+        for p in paths:
+            p = os.path.abspath(p)
+            if p not in seen and os.path.isfile(p) and allowed(p):
+                seen.add(p)
+                out.append((p, src))
+    return out
+
+
+# ------------------------------------------------------------------ chunking
+
+def redact(text):
+    return secretscan.redact(text)
+
+
+def clean(text):
+    text = SYSREM_RE.sub("", text)
+    text = BLOB_RE.sub("[blob]", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def split_long(text, limit=CHUNK):
+    """[(line_offset, part)]: pieces of <= ~limit chars, cut at line or word boundaries."""
+    if len(text) <= limit:
+        return [(0, text)]
+    parts, cur, cur_start, line_no = [], [], 0, 0
+    size = 0
+    for line in text.split("\n"):
+        while len(line) > limit:
+            cut = line.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            if cur:
+                parts.append((cur_start, "\n".join(cur)))
+                cur, size = [], 0
+            parts.append((line_no, line[:cut]))
+            line = line[cut:].lstrip()
+        if cur and size + len(line) + 1 > limit:
+            parts.append((cur_start, "\n".join(cur)))
+            cur, size = [], 0
+        if not cur:
+            cur_start = line_no
+        cur.append(line)
+        size += len(line) + 1
+        line_no += 1
+    if cur and "\n".join(cur).strip():
+        parts.append((cur_start, "\n".join(cur)))
+    return [(o, p) for o, p in parts if p.strip()]
+
+
+def fmt_date(d, t=None):
+    return d + (" " + t if t else "")
+
+
+def md_chunks(text, path, mtime):
+    """[(line, head, body, date)] by heading / top-level list item / paragraph."""
+    fname_date = DATE_RE.search(os.path.basename(path))
+    fallback = fname_date.group(1) if fname_date else datetime.fromtimestamp(mtime, TZ).strftime("%Y-%m-%d")
+    out, heads, cur, start, blank = [], [], [], 0, False
+
+    def flush():
+        body = "\n".join(cur).strip()
+        if not body:
+            return
+        head = " / ".join(h for _, h in heads)
+        hd = DATE_RE.search(head)
+        for off, part in split_long(body):
+            m = LEAD_DATE_RE.match(part) or LEAD_DATE_RE.match(body)
+            if m:
+                date = fmt_date(m.group(1), m.group(2))
+            elif hd:
+                date = hd.group(1)
+            else:
+                date = fallback
+            out.append((start + 1 + off, head, part, date))
+
+    for i, line in enumerate(text.split("\n")):
+        m = HEADING_RE.match(line)
+        if m:
+            flush()
+            cur, blank = [], False
+            lvl = len(m.group(1))
+            heads = [h for h in heads if h[0] < lvl] + [(lvl, m.group(2).strip())]
+            continue
+        if not line.strip():
+            blank = True
+            continue
+        indented = line[:1] in (" ", "\t")
+        if cur and (ITEM_RE.match(line) or (blank and not indented)):
+            flush()
+            cur = []
+        if not cur:
+            start = i
+        cur.append(line)
+        blank = False
+    flush()
+    return out
+
+
+def local_ts(ts):
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return ""
+
+
+def channel_msgs(s):
+    for m in CHANNEL_RE.finditer(s):
+        a = {k: html.unescape(v) for k, v in ATTR_RE.findall(m.group(1))}
+        body = m.group(2).strip()
+        ev = a.get("event_type", "")
+        loc = "tg#" + a["message_id"] if a.get("message_id") else ""
+        if ev == "button":
+            text = "[button] " + a.get("button_text", "")
+            if a.get("message_text"):
+                text += " (on: " + a["message_text"][:200] + ")"
+        elif ev == "reaction":
+            text = "[reaction %s] on: %s" % (a.get("reaction", ""), a.get("reacted_to_text", "")[:200])
+            if a.get("reacted_to_message_id"):
+                loc = "tg#" + a["reacted_to_message_id"]
+        elif ev:
+            text = "[%s] %s" % (ev, body)
+        else:
+            text = body
+            if a.get("attachment_kind"):
+                text = "[%s] %s" % (a["attachment_kind"], text)
+            if a.get("reply_to_text"):
+                text += "\n(re: " + a["reply_to_text"][:200] + ")"
+        if text.strip():
+            yield "owner", loc, text
+
+
+def chat_texts(o):
+    """(role, loc, text) for the parts of one transcript record worth indexing."""
+    t = o.get("type")
+    if t not in ("user", "assistant") or o.get("isCompactSummary") or o.get("isVisibleInTranscriptOnly"):
+        return
+    c = (o.get("message") or {}).get("content")
+    blocks = [{"type": "text", "text": c}] if isinstance(c, str) else (c if isinstance(c, list) else [])
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if t == "assistant":
+            if bt == "text" and isinstance(b.get("text"), str):
+                yield "me", "", b["text"]
+            elif bt == "tool_use" and str(b.get("name", "")).endswith("telegram__reply"):
+                inp = b.get("input") or {}
+                if isinstance(inp.get("text"), str):  # what the owner actually read
+                    yield "me>tg", "", inp["text"]
+            continue
+        if bt != "text" or not isinstance(b.get("text"), str):
+            continue  # tool_result, image, document, ...
+        text = b["text"]
+        s = text.lstrip()
+        if s.startswith("<channel"):
+            yield from channel_msgs(SYSREM_RE.sub("", s))
+        elif s.startswith("<task-notification"):
+            parts = dict((k, v.strip()) for k, v in TAG_RE.findall(s))
+            body = "\n".join(x for x in (parts.get("summary"), parts.get("result")) if x)
+            if body:
+                yield "agent", "", body
+        elif s.startswith("Another Claude session sent a message"):
+            yield "msg", "", text
+        elif o.get("isMeta") or s.startswith(SKIP_PREFIX):
+            continue  # skill bodies, injected context, heartbeats, local commands
+        else:
+            yield "owner", "", text
+
+
+# ------------------------------------------------------------------ database
+
+def connect():
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    db = sqlite3.connect(DB, timeout=30)
+    os.chmod(DB, 0o600)
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+        CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, src TEXT, mtime REAL, size INTEGER,
+                                         off INTEGER, lineno INTEGER, headhash TEXT);
+        CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY, path TEXT, src TEXT, date TEXT,
+                                        role TEXT, loc TEXT);
+        CREATE INDEX IF NOT EXISTS docs_path ON docs(path);
+        CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(head, body,
+            tokenize = 'porter unicode61 remove_diacritics 2');
+    """)
+    v = db.execute("SELECT v FROM meta WHERE k='schema'").fetchone()
+    if v is None:
+        db.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (SCHEMA,))
+        db.commit()
+    elif v[0] != SCHEMA:
+        db.close()
+        os.remove(DB)
+        return connect()
+    return db
+
+
+def meta(db, k, default=None):
+    r = db.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return r[0] if r else default
+
+
+def drop_path(db, path):
+    db.execute("DELETE FROM fts WHERE rowid IN (SELECT id FROM docs WHERE path=?)", (path,))
+    db.execute("DELETE FROM docs WHERE path=?", (path,))
+
+
+def add(db, path, src, date, role, loc, head, body):
+    cur = db.execute("INSERT INTO docs(path, src, date, role, loc) VALUES(?,?,?,?,?)",
+                     (path, src, date, role, loc))
+    db.execute("INSERT INTO fts(rowid, head, body) VALUES(?,?,?)", (cur.lastrowid, head, body))
+
+
+def head_hash(path, n):
+    with open(path, "rb") as f:
+        return hashlib.sha1(f.read(n)).hexdigest()
+
+
+def index_md(db, path, st):
+    drop_path(db, path)
+    n = 0
+    if st.st_size <= MAX_MD_BYTES:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = redact(f.read())
+        for line, head, body, date in md_chunks(text, path, st.st_mtime):
+            add(db, path, "md", date, "", str(line), head, body)
+            n += 1
+    db.execute("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?)",
+               (path, "md", st.st_mtime, st.st_size, 0, 0, ""))
+    return n
+
+
+def index_jsonl(db, path, st, known, full):
+    start, lineno = 0, 0
+    if known and not full:
+        _, _, mtime, size, off, ln, hh = known
+        try:
+            hl, hx = hh.split(":")
+            same_head = int(hl) <= st.st_size and head_hash(path, int(hl)) == hx
+        except (ValueError, OSError):
+            same_head = False
+        if same_head and st.st_size >= off:
+            if st.st_size == size and st.st_mtime == mtime:
+                return 0
+            start, lineno = off, ln
+    if start == 0:
+        drop_path(db, path)
+    n, pos = 0, start
+    sess = os.path.basename(path)[:8]
+    with open(path, "rb") as f:
+        f.seek(start)
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break  # line still being written; picked up next time
+            pos += len(raw)
+            lineno += 1
+            if not TYPE_RE.search(raw):
+                continue
+            try:
+                o = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(o, dict):
+                continue
+            date = local_ts(o.get("timestamp", ""))
+            for role, tg, text in chat_texts(o):
+                text = clean(text)
+                if not text:
+                    continue
+                text = redact(text)
+                loc = ("%s:L%d %s" % (sess, lineno, tg)).strip()
+                for _, part in split_long(text):
+                    add(db, path, "chat", date, role, loc, "", part)
+                    n += 1
+            if n and n % 2000 == 0:
+                db.commit()
+    hl = min(pos, 4096)
+    db.execute("INSERT OR REPLACE INTO files VALUES(?,?,?,?,?,?,?)",
+               (path, "chat", st.st_mtime, st.st_size, pos, lineno, "%d:%s" % (hl, head_hash(path, hl))))
+    return n
+
+
+class Busy(Exception):
+    pass
+
+
+def lock(block):
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(STATE, "lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+    except BlockingIOError:
+        os.close(fd)
+        raise Busy()
+    return fd
+
+
+def index(db, full=False, block=True):
+    if secretscan is None:
+        raise RuntimeError("secretscan module unavailable: refusing to index (fail-closed)")
+    fd = lock(block)
+    try:
+        t0, added, changed = time.time(), 0, 0
+        srcs = sources()
+        known = {r[0]: r for r in db.execute("SELECT * FROM files")}
+        current = {p for p, _ in srcs}
+        for p in known:
+            if p not in current:
+                drop_path(db, p)
+                db.execute("DELETE FROM files WHERE path=?", (p,))
+                changed += 1
+        for p, src in srcs:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            k = known.get(p)
+            if src == "md":
+                if k and not full and k[2] == st.st_mtime and k[3] == st.st_size:
+                    continue
+                added += index_md(db, p, st)
+                changed += 1
+            else:
+                n = index_jsonl(db, p, st, k, full)
+                added += n
+                changed += 1 if (n or not k or full) else 0
+            db.commit()
+        db.execute("INSERT OR REPLACE INTO meta VALUES('last_index', ?)", (str(now()),))
+        db.commit()
+        return added, changed, time.time() - t0
+    finally:
+        os.close(fd)
+
+
+# ------------------------------------------------------------------ search
+
+def build_terms(q):
+    phrases = re.findall(r'"([^"]+)"', q)
+    rest = re.sub(r'"[^"]*"?', " ", q)
+    words = re.findall(r"\w+(?:[-.']\w+)*\*?", rest)
+    keep = [w for w in words if w.lower().rstrip("*") not in STOP]
+    words = keep or words
+    terms = ['"%s"' % p.replace('"', '""') for p in phrases if p.strip()]
+    for w in words:
+        star = w.endswith("*")
+        terms.append('"%s"%s' % (w.rstrip("*").replace('"', '""'), "*" if star else ""))
+    seen, out = set(), []
+    for t in terms:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def norm_snip(s):
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) <= SNIP else s[:SNIP - 1].rstrip() + "…"
+
+
+def run_query(db, match, args, exclude, limit):
+    sql = ("SELECT d.id, d.date, d.src, d.role, d.path, d.loc, snippet(fts, -1, '', '', '…', 36) "
+           "FROM fts JOIN docs d ON d.id = fts.rowid WHERE fts MATCH ?")
+    params = [match]
+    if args.since:
+        sql += " AND d.date >= ?"
+        params.append(args.since)
+    if args.src != "all":
+        sql += " AND d.src = ?"
+        params.append(args.src)
+    sql += " ORDER BY bm25(fts, 0.5, 1.0) LIMIT ?"
+    params.append(limit)
+    return [r for r in db.execute(sql, params) if r[0] not in exclude]
+
+
+def where(path, src, role, loc):
+    if src == "chat":
+        tg = [x for x in loc.split() if x.startswith("tg#")]
+        return "chat/" + role + (" " + tg[0] if tg else "")
+    return "%s:%s" % (os.path.relpath(path, HOME), loc)
+
+
+def age_str(db):
+    last = float(meta(db, "last_index", "0"))
+    m = int((now() - last) // 60)
+    return "%dm" % m if m < 120 else "%dh" % (m // 60)
+
+
+def search(db, args):
+    n = max(1, min(args.n, MAX_HITS))
+    if args.raw:
+        queries = [args.query]
+    else:
+        terms = build_terms(args.query)
+        if not terms:
+            die("empty query")
+        queries = [" ".join(terms)] + ([" OR ".join(terms)] if len(terms) > 1 else [])
+    hits, ids, snips = [], set(), set()
+    for q in queries:
+        try:
+            rows = run_query(db, q, args, ids, n * 4)
+        except sqlite3.OperationalError as e:
+            die("bad query (%s); try plain words or --raw with FTS5 syntax" % e)
+        for r in rows:
+            s = norm_snip(r[6])
+            if s in snips:
+                continue
+            snips.add(s)
+            ids.add(r[0])
+            hits.append(r[:6] + (s,))
+            if len(hits) >= n:
+                break
+        if len(hits) >= n:
+            break
+    if args.by_date:
+        hits.sort(key=lambda r: r[1], reverse=True)
+    filt = "".join([" since " + args.since if args.since else "", " src=" + args.src if args.src != "all" else ""])
+    if not hits:
+        print('recall: no hits for "%s"%s (index %s old; try fewer words or --src all)' % (args.query, filt, age_str(db)))
+        return 1
+    print('recall: %d hits for "%s"%s · index %s old · recall --show ID [-C 2] for more'
+          % (len(hits), args.query, filt, age_str(db)))
+    for id_, date, src, role, path, loc, snip in hits:
+        print("#%d %s %s  %s" % (id_, date, where(path, src, role, loc), snip))
+    return 0
+
+
+def show(db, args):
+    r = db.execute("SELECT id, path FROM docs WHERE id=?", (args.show,)).fetchone()
+    if not r:
+        die("no chunk #%d (the index may have been rebuilt; search again)" % args.show, 1)
+    k = max(0, min(args.C, 10))
+    before = [x[0] for x in db.execute("SELECT id FROM docs WHERE path=? AND id<? ORDER BY id DESC LIMIT ?",
+                                       (r[1], r[0], k))]
+    after = [x[0] for x in db.execute("SELECT id FROM docs WHERE path=? AND id>? ORDER BY id LIMIT ?",
+                                      (r[1], r[0], k))]
+    for i in sorted(before) + [r[0]] + after:
+        d = db.execute("SELECT d.id, d.date, d.src, d.role, d.path, d.loc, f.head, f.body FROM docs d "
+                       "JOIN fts f ON f.rowid = d.id WHERE d.id=?", (i,)).fetchone()
+        id_, date, src, role, path, loc, head, body = d
+        if src == "chat":
+            label = "transcript %s (%s)" % (loc, role)
+        else:
+            label = "%s:%s" % (os.path.relpath(path, HOME), loc) + (" [%s]" % head if head else "")
+        mark = ">>" if i == r[0] else "--"
+        print("%s #%d %s %s" % (mark, id_, date, label))
+        print(body if len(body) <= 1500 else body[:1500] + " …[cut]")
+    return 0
+
+
+def stats(db):
+    rows = dict(db.execute("SELECT src, COUNT(*) FROM docs GROUP BY src").fetchall())
+    files = dict(db.execute("SELECT src, COUNT(*) FROM files GROUP BY src").fetchall())
+    size = os.path.getsize(DB) / 1e6
+    print("recall index: %d md chunks (%d files), %d chat chunks (%d transcripts), %.1f MB, updated %s ago"
+          % (rows.get("md", 0), files.get("md", 0), rows.get("chat", 0), files.get("chat", 0), size, age_str(db)))
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="recall", description="Search my own past work (local SQLite FTS5).")
+    ap.add_argument("query", nargs="?")
+    ap.add_argument("--since", metavar="YYYY-MM-DD")
+    ap.add_argument("--src", choices=("md", "chat", "all"), default="all")
+    ap.add_argument("-n", type=int, default=10, help="max hits (capped at %d)" % MAX_HITS)
+    ap.add_argument("--by-date", action="store_true", help="newest first instead of best match first")
+    ap.add_argument("--raw", action="store_true", help="query is FTS5 MATCH syntax")
+    ap.add_argument("--show", type=int, metavar="ID")
+    ap.add_argument("-C", type=int, default=0, metavar="K", help="with --show: K neighbouring chunks")
+    ap.add_argument("--index", action="store_true")
+    ap.add_argument("--rebuild", action="store_true")
+    ap.add_argument("--cron", action="store_true", help="with --index: ~/inbox note on failure")
+    ap.add_argument("--stats", action="store_true")
+    args = ap.parse_args(argv)
+    if args.since and not re.fullmatch(r"\d{4}-\d\d-\d\d", args.since):
+        die("--since wants YYYY-MM-DD")
+
+    if args.index or args.rebuild:
+        try:
+            if args.rebuild:
+                fd = lock(True)
+                try:
+                    for suffix in ("", "-journal", "-wal", "-shm"):
+                        if os.path.exists(DB + suffix):
+                            os.remove(DB + suffix)
+                finally:
+                    os.close(fd)
+            db = connect()
+            added, changed, secs = index(db, full=args.rebuild)
+            if args.rebuild or changed:
+                db.execute("INSERT INTO fts(fts) VALUES('optimize')")
+                db.commit()
+            total = db.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            print("recall: +%d chunks from %d changed files in %.1fs; %d chunks total" % (added, changed, secs, total))
+            return 0
+        except Exception as e:
+            if args.cron:
+                os.makedirs(INBOX, exist_ok=True)
+                with open(os.path.join(INBOX, "recall-index-failed-%d.md" % int(time.time())), "w") as f:
+                    f.write("recall --index failed %s: %s. Check `recall --index` by hand.\n"
+                            % (datetime.now(TZ).strftime("%F %H:%M"), type(e).__name__))
+            die("index failed: %s" % e)
+
+    if args.show is None and not args.stats and not args.query:
+        ap.print_usage()
+        return 2
+    fresh = not os.path.exists(DB)
+    db = connect()
+    if args.show is None:
+        last = float(meta(db, "last_index", "0"))
+        if fresh or now() - last > STALE_SECS:
+            try:
+                index(db, block=fresh)
+            except Busy:
+                pass  # another indexer is running; search what is there
+            except Exception as e:
+                if fresh:
+                    die("index failed: %s" % e)
+                print("recall: index refresh failed (%s); results may be stale" % e, file=sys.stderr)
+    if args.stats:
+        return stats(db)
+    if args.show is not None:
+        return show(db, args)
+    return search(db, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

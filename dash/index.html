@@ -1,0 +1,2584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<!--dash:head-->
+<title>Claude Bot Dashboard</title>
+<style>
+/* Layout: phone-first single column of panels under a sticky tab bar; panels pair up from 760px. */
+:root {
+  --page: #f4f4f1;
+  --surface: #fcfcfb;
+  --surface-2: #efeee9;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #6f6d67;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --accent: #2a78d6;
+  --accent-ink: #1c5cab;
+  --accent-wash: #e3eefb;
+  --quiet: rgba(98, 80, 214, 0.07);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --s6: #008300;
+  --s7: #6250d6;
+  --s8: #e34948;
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --warning: #fab219;
+  --warning-ink: #8a5a00;
+  --serious: #ec835a;
+  --serious-ink: #a4401a;
+  --critical: #d03b3b;
+  --critical-ink: #b02a2a;
+  --n-cloud: #fbebe3;
+  --n-lan: #efeee9;
+  --n-vault: #e2f3e2;
+  --n-me: #e3eefb;
+  --tip-bg: #ffffff;
+  --shadow: 0 6px 24px rgba(11, 11, 11, 0.12);
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --r: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #262624; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #9a988f;
+    --grid: #2c2c2a; --axis: #45453f; --border: rgba(255, 255, 255, 0.10); --accent: #3987e5; --accent-ink: #86b6ef;
+    --accent-wash: #1b2a3e; --quiet: rgba(144, 133, 233, 0.10); --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --good-ink: #0ca30c; --warning-ink: #fab219; --serious-ink: #ec835a; --critical-ink: #e66767;
+    --n-cloud: #33231b; --n-lan: #262624; --n-vault: #15301a; --n-me: #1b2a3e; --tip-bg: #262624;
+    --shadow: 0 6px 24px rgba(0, 0, 0, 0.5); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #262624; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #9a988f;
+  --grid: #2c2c2a; --axis: #45453f; --border: rgba(255, 255, 255, 0.10); --accent: #3987e5; --accent-ink: #86b6ef;
+  --accent-wash: #1b2a3e; --quiet: rgba(144, 133, 233, 0.10); --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --good-ink: #0ca30c; --warning-ink: #fab219; --serious-ink: #ec835a; --critical-ink: #e66767;
+  --n-cloud: #33231b; --n-lan: #262624; --n-vault: #15301a; --n-me: #1b2a3e; --tip-bg: #262624;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.5); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 15px/1.45 var(--font-ui); }
+.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 16px; padding-block: 0 40px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+h1 { font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+h2 { font-size: 15px; font-weight: 650; }
+h3 { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+p { margin: 0; }
+a { color: var(--accent-ink); }
+.mono { font-family: var(--font-mono); font-size: 0.86em; }
+.muted { color: var(--muted); }
+.ink2 { color: var(--ink-2); }
+.small { font-size: 13px; }
+.tnum { font-variant-numeric: tabular-nums; }
+.eyebrow { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+
+/* header + tabs */
+.top { padding-block: 18px 10px; display: grid; gap: 6px; }
+.top-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.statusline { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 3px 10px 3px 8px;
+  border-radius: 999px; background: var(--surface-2); color: var(--ink-2); }
+.state .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.state.working { background: var(--accent-wash); color: var(--accent-ink); }
+.state.working .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .state.working .dot { animation: none; } }
+.fresh { font-size: 12.5px; color: var(--muted); }
+.fresh.stale { color: var(--warning-ink); font-weight: 600; }
+nav.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--page);
+  margin-inline: -16px; padding-inline: 16px; border-bottom: 1px solid var(--border); }
+.tabs-inner { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.tabs-inner::-webkit-scrollbar { display: none; }
+.tab { appearance: none; border: 0; background: none; font: inherit; font-size: 14px; font-weight: 550; color: var(--ink-2);
+  padding: 11px 9px 10px; border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--accent-ink); border-bottom-color: var(--accent); }
+.tab:focus-visible, button:focus-visible, [tabindex]:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* panels */
+section.view { display: grid; gap: 14px; padding-top: 16px; }
+.grid2 { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .grid2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; display: grid;
+  gap: 10px; min-width: 0; align-content: start; }
+.panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.note { font-size: 12.5px; color: var(--muted); }
+
+/* overview */
+.hero { display: grid; gap: 4px; }
+.hero .value { font-size: 52px; line-height: 1.05; font-weight: 650; letter-spacing: -0.02em; }
+.hero .value small { font-size: 22px; font-weight: 550; color: var(--ink-2); letter-spacing: 0; margin-left: 4px; }
+.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (min-width: 760px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 12px; display: grid; gap: 2px; min-width: 0; }
+.tile .label { font-size: 12.5px; color: var(--ink-2); }
+.tile .value { font-size: 24px; font-weight: 650; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.tile .sub { font-size: 12.5px; color: var(--muted); }
+.tile.wide { grid-column: 1 / -1; gap: 6px; }
+.pace { display: grid; gap: 6px; margin-bottom: 10px; }
+.pace-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 14px; }
+.meter { position: relative; height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 999px; background: var(--accent); }
+.meter .mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--ink); }
+.sw.dash { height: 0; border-top: 2px dashed var(--ink-2); border-radius: 0; width: 14px; }
+.sw.dot { border-radius: 50%; background: var(--s4); }
+ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+ul.plain li { min-width: 0; overflow-wrap: anywhere; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; font-size: 14px; }
+.kv dt { color: var(--ink-2); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+.linkbtn { appearance: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); font: inherit;
+  font-size: 13px; font-weight: 550; padding: 6px 12px; border-radius: 999px; cursor: pointer; justify-self: start; }
+.linkbtn:hover { border-color: var(--axis); }
+
+/* chips */
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 1px 8px;
+  border-radius: 999px; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+.chip .ico { font-size: 10px; }
+.chip.ok { color: var(--good-ink); }
+.chip.ok .ico { color: var(--good); }
+.chip.warn { color: var(--warning-ink); }
+.chip.warn .ico { color: var(--warning); }
+.chip.critical { color: var(--critical-ink); }
+.chip.critical .ico { color: var(--critical); }
+.chip.serious { color: var(--serious-ink); }
+.chip.serious .ico { color: var(--serious); }
+.chip.accent { background: var(--accent-wash); color: var(--accent-ink); }
+.chip.off { text-decoration: line-through; }
+
+/* charts */
+.seg { display: inline-flex; background: var(--surface-2); border-radius: 999px; padding: 2px; }
+.seg button { appearance: none; border: 0; background: none; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink-2);
+  padding: 4px 12px; border-radius: 999px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.sw.shade { background: var(--quiet); outline: 1px solid var(--grid); }
+.chart { position: relative; min-width: 0; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.chart svg:focus { outline: none; }
+.chart svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.tip { position: absolute; pointer-events: none; z-index: 3; background: var(--tip-bg); color: var(--ink); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow); padding: 8px 10px; font-size: 12.5px; min-width: 150px; display: grid; gap: 3px; }
+.tip .t { font-weight: 600; color: var(--ink-2); margin-bottom: 2px; }
+.tip .r { display: grid; grid-template-columns: 14px auto 1fr; align-items: center; gap: 6px; }
+.tip .r b { font-variant-numeric: tabular-nums; }
+.tip .r span:last-child { color: var(--ink-2); }
+.tip .k { width: 12px; height: 2px; border-radius: 1px; }
+details.table { font-size: 13px; }
+details.table summary { cursor: pointer; color: var(--ink-2); font-weight: 550; width: max-content; }
+.tablewrap { overflow-x: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); font-size: 12px; white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+
+/* ranked bars */
+.bars { display: grid; gap: 10px; }
+.bar-row { display: grid; gap: 4px; min-width: 0; }
+.bar-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; font-size: 13.5px; }
+.bar-top .name { min-width: 0; overflow-wrap: anywhere; }
+.bar-top .val { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ink-2); }
+.bar-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; color: var(--muted); }
+.track { height: 8px; }
+.fill { height: 8px; background: var(--s1); border-radius: 0 4px 4px 0; min-width: 2px; }
+
+/* lists */
+.timeline { list-style: none; margin: 0; padding: 0; display: grid; }
+.timeline li { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--grid); font-size: 14px; }
+.timeline li:last-child { border-bottom: 0; }
+.timeline .when { font-family: var(--font-mono); font-size: 12px; color: var(--muted); padding-top: 2px; }
+.timeline .what { min-width: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.cron li { display: grid; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--grid); }
+.cron li:last-child { border-bottom: 0; }
+.cron .row1 { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; font-size: 14px; }
+.cron .row1 b { font-weight: 600; }
+.cron .row2 { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.cron li.disabled .row1 { color: var(--muted); }
+.todo-group { display: grid; gap: 6px; }
+.todo-group h3 { display: flex; gap: 6px; align-items: center; }
+.count { font-size: 11.5px; font-weight: 650; min-width: 20px; text-align: center; padding: 0 6px; border-radius: 999px; background: var(--surface-2); color: var(--ink-2); }
+.empty { color: var(--muted); font-size: 13.5px; }
+/* goals, today, context */
+ul.goals { gap: 12px; }
+.goal { display: grid; gap: 5px; }
+.goal-title { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.goal .meter { height: 6px; }
+.hn li a { text-decoration: none; font-weight: 550; }
+.hn li a:hover { text-decoration: underline; }
+.hn .chip, .done-list .chip { margin-left: 2px; }
+.nights { display: grid; gap: 6px; padding: 8px 0 0; }
+.nights p { margin: 0; }
+details.night .done-list { padding: 6px 0 4px 12px; }
+.skills { display: grid; gap: 8px; }
+.strip { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13.5px; color: var(--ink-2); }
+.strip b { color: var(--ink); font-weight: 650; font-variant-numeric: tabular-nums; }
+.skills div { font-size: 13.5px; overflow-wrap: anywhere; }
+.skills b { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600; }
+
+/* data map */
+.highlights { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .highlights { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.hl { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; background: var(--surface); display: grid; gap: 4px; }
+.hl.high { border-color: var(--serious); }
+.hl.good { border-color: var(--good); }
+.hl h3 { color: var(--ink); font-size: 14px; display: flex; gap: 8px; align-items: center; }
+.hl p { font-size: 13.5px; color: var(--ink-2); }
+.dlegend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-2); }
+.dlegend span { display: inline-flex; gap: 6px; align-items: center; }
+.dlegend svg { width: 26px; height: 8px; }
+.gsw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border); display: inline-block; }
+.flows { list-style: none; margin: 0; padding: 0; display: grid; }
+.flows li { display: grid; gap: 3px; padding: 9px 0; border-bottom: 1px solid var(--grid); }
+.flows li:last-child { border-bottom: 0; }
+.flows .route { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 14px; font-weight: 600; }
+.flows .route .arrow { color: var(--muted); font-weight: 400; }
+.flows .d { font-size: 13.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.flows .t { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.stores { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 760px) { .stores { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.store { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; display: grid; gap: 4px; background: var(--surface); min-width: 0; }
+.store .head { display: flex; justify-content: space-between; gap: 8px; align-items: start; }
+.store .head b { font-size: 14px; }
+.store .w { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.store .h { font-size: 13.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.store .live { font-size: 12.5px; font-family: var(--font-mono); color: var(--ink-2); }
+.filterbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--ink-2); }
+
+/* data tab: live vault tiles, grouped flows, compact stores */
+.vault-live { display: grid; gap: 8px; }
+@media (min-width: 760px) { .tiles.four { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.tiles.four .tile { align-content: start; }
+.tile .delta { font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tile .chip { justify-self: start; margin: 2px 0; }
+.tile.reads { position: relative; }
+.spark { margin: 4px 0 2px; max-width: 220px; }
+.spark svg { overflow: visible; }
+.spark .base { stroke: var(--axis); stroke-width: 1; }
+.spark .col { fill: var(--axis); }
+.spark .col.today { fill: var(--s1); }
+.spark .dl { font: 9.5px var(--font-ui); fill: var(--muted); }
+.spark .dl.today { fill: var(--ink-2); font-weight: 600; }
+.spark .hit { fill: transparent; cursor: default; }
+.spark .tip { min-width: 0; width: 150px; }
+.fgroups { display: grid; gap: 12px; }
+.fgroup > summary { list-style: none; cursor: pointer; display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+.fgroup > summary::-webkit-details-marker { display: none; }
+.fgroup h3 { display: flex; gap: 6px; align-items: center; }
+.fgroup .chev, details.store .chev { color: var(--muted); font-size: 15px; line-height: 1; width: 10px; transition: transform 0.15s; }
+.fgroup[open] .chev, details.store[open] .chev { transform: rotate(90deg); }
+details.store { padding: 0; gap: 0; border: 0; border-bottom: 1px solid var(--grid); border-radius: 0; background: none; }
+details.store > summary { list-style: none; cursor: pointer; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 2px 8px;
+  align-items: center; padding: 9px 2px; }
+details.store > summary::-webkit-details-marker { display: none; }
+details.store > summary b { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+details.store > summary .w { grid-column: 2 / -1; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+details.store > summary .live { font-family: var(--font-mono); font-size: 12px; color: var(--ink-2); }
+details.store .body { display: grid; gap: 4px; padding: 0 12px 12px 32px; }
+.stores:has(details.store) { gap: 0 18px; align-items: start; }
+details.store .body { padding: 0 2px 10px 22px; }
+
+/* health */
+.checks { list-style: none; margin: 0; padding: 0; display: grid; }
+.checks li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 10px 0; border-bottom: 1px solid var(--grid); }
+.checks li:last-child { border-bottom: 0; }
+.checks .name { font-weight: 600; font-size: 14.5px; }
+.checks .val { grid-column: 1 / -1; font-size: 13.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.checks .det { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+footer { padding-top: 22px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+.err { background: var(--surface); border: 1px solid var(--critical); border-radius: var(--r); padding: 14px; }
+/* growth: small multiples (each its own scale) */
+.gbody { display: grid; gap: 10px; min-width: 0; }
+.multiples { display: grid; gap: 14px 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 760px) { .multiples { grid-template-columns: repeat(4, minmax(0, 1fr)); } .multiples.two { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.mult { display: grid; gap: 2px; min-width: 0; align-content: start; }
+.mult-head { font-size: 12.5px; color: var(--ink-2); min-width: 0; }
+.mult-name { display: inline-flex; gap: 6px; align-items: center; overflow-wrap: anywhere; }
+.mult-val b { font-size: 17px; font-weight: 650; }
+.mult-val span { font-size: 12.5px; color: var(--muted); }
+.tip.compact { min-width: 0; width: max-content; max-width: 220px; }
+/* architecture: static inline-SVG system map (template #arch-tpl) */
+.arch-fig { margin: 0; display: grid; gap: 8px; }
+svg.arch { display: block; width: 100%; max-width: 820px; margin: 0 auto; height: auto; }
+/* two maps, one shown: portrait (arch-p) on phones, landscape (arch-l) from 760 px; the notes panel sits under the map */
+svg.arch.arch-l { display: none; max-width: none; }
+@media (min-width: 760px) { svg.arch.arch-p { display: none; } svg.arch.arch-l { display: block; } .arch-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 1000px) { ul.arch-notes { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 48px; } }
+@media (min-width: 1200px) { .wrap:has(#view-architecture:not([hidden])) { max-width: 1400px; } }
+.arch .z { stroke: var(--border); stroke-width: 1; }
+.arch .z-you { fill: var(--quiet); } .arch .z-me { fill: var(--n-me); } .arch .z-net { fill: var(--n-cloud); }
+.arch .z-vault { fill: var(--n-vault); } .arch .z-lan { fill: var(--n-lan); }
+.arch .zt { font: 700 9.5px var(--font-ui); letter-spacing: 0.06em; fill: var(--muted); }
+.arch .b { fill: var(--surface); stroke: var(--axis); stroke-width: 1; }
+.arch .b.me { stroke: var(--accent); stroke-width: 1.5; }
+.arch .b.hot { stroke: var(--serious); stroke-width: 2; }
+.arch .b.ok { stroke: var(--good); stroke-width: 1.6; }
+.arch .grp { fill: var(--surface-2); stroke: var(--border); stroke-width: 1; }
+.arch .div { stroke: var(--grid); stroke-width: 1; }
+.arch .l { font: 600 11.5px var(--font-ui); fill: var(--ink); }
+.arch .s { font: 10px var(--font-ui); fill: var(--ink-2); }
+.arch .m { font: 9.5px var(--font-ui); fill: var(--muted); }
+.arch .s.hot { fill: var(--serious-ink); font-weight: 600; }
+.arch .e, .dlegend .lg { fill: none; stroke: var(--ink-2); stroke-width: 1.4; }
+.arch .e.c, .dlegend .lg.c { stroke-dasharray: 4 3; }
+.arch .e.hot, .dlegend .lg.hot { stroke: var(--serious); stroke-width: 2.6; }
+.arch .e.ok, .dlegend .lg.ok { stroke: var(--good); stroke-width: 2; }
+.arch .mk { fill: var(--ink-2); } .arch .mk.hot { fill: var(--serious); } .arch .mk.ok { fill: var(--good); }
+.arch .el { font: 9.5px var(--font-ui); fill: var(--ink-2); }
+.arch .el.ok { fill: var(--good-ink); font-weight: 600; }
+.arch .bnd { stroke: var(--good); stroke-width: 2.4; }
+svg.arch-l .l { font-size: 13px; } svg.arch-l .s { font-size: 11.5px; } svg.arch-l .m, svg.arch-l .el, svg.arch-l .zt { font-size: 11px; }
+.lock circle { fill: var(--surface); stroke: var(--good); stroke-width: 1.5; }
+.lock rect { fill: var(--good); } .lock .sh { fill: none; stroke: var(--good); stroke-width: 1.4; }
+.dlegend svg.lglock { width: 14px; height: 14px; }
+.arch-notes { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13.5px; color: var(--ink-2); }
+.arch-notes b { color: var(--ink); font-weight: 600; }
+@media (max-width: 759px) { svg.arch { width: calc(100% + 16px); max-width: none; margin: 0 -8px; } }   /* phones: use the panel padding, labels stay ~95 % size */
+/* live data flow (flowd SSE at /live): clickable lines, flashes, side panel (desktop) / bottom sheet (phone) */
+.arch [data-edge], .arch [data-node="main"] { cursor: pointer; outline: none; }
+.arch .hit { fill: none; stroke: transparent; stroke-width: 18; pointer-events: stroke; }
+.arch [data-edge]:hover .e, .arch [data-edge]:focus-visible .e { stroke-width: 3.2; }
+.arch [data-node="main"]:focus-visible .b, .arch [data-node="main"]:hover .b { stroke-width: 2.6; }
+.arch [data-edge].sel .e { stroke: var(--accent); stroke-width: 3.4; }
+.arch [data-edge].sel .el { fill: var(--accent-ink); font-weight: 600; }
+.arch [data-node="main"].sel .b { stroke-width: 3.2; }
+.arch [data-edge].ping .e { animation: live-ping 1.2s ease-out; }
+.arch [data-node].ping .b { animation: live-pingb 1.2s ease-out; }
+@keyframes live-ping { 0% { stroke: var(--accent); stroke-width: 6; } 100% { } }
+@keyframes live-pingb { 0% { stroke: var(--accent); stroke-width: 4.5; } 100% { } }
+@media (prefers-reduced-motion: reduce) { .arch [data-edge].ping .e, .arch [data-node].ping .b { animation: none; stroke: var(--accent); } }
+.live-hint { margin: 0; text-align: center; }
+.live { position: fixed; z-index: 50; display: flex; flex-direction: column; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); box-shadow: 0 10px 32px rgba(0, 0, 0, 0.22); }
+.live[hidden] { display: none; }
+@media (min-width: 760px) { .live { top: 0; right: 0; bottom: 0; width: clamp(300px, 36vw, 440px); border-width: 0 0 0 1px; }
+  body.live-open { padding-right: clamp(300px, 36vw, 440px); } }   /* the page shrinks beside the drawer, never under it */
+@media (max-width: 759px) { body.live-open { padding-bottom: 46vh; } .live { left: 0; right: 0; bottom: 0; height: 44vh; border-radius: 14px 14px 0 0; border-width: 1px 0 0; } }
+.live-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--grid); }
+.live-head h3 { margin: 0; flex: 1; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
+.live-head button, .live-ev button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--ink); cursor: pointer; }
+.live-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.live-dot.on { background: var(--good); } .live-dot.err { background: var(--serious); }
+.live-sub { padding: 6px 14px; font-size: 12.5px; color: var(--muted); border-bottom: 1px solid var(--grid); }
+.live-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 2px 14px 18px; }
+.live-note, .live-empty { padding: 10px 0; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--grid); }
+.live-ev { display: grid; gap: 5px; padding: 9px 0; border-bottom: 1px solid var(--grid); }
+.live-ev .top { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: 12.5px; color: var(--muted); }
+.live-ev .dir { color: var(--ink-2); font-weight: 600; }
+.live-ev .who { font-style: italic; overflow-wrap: anywhere; }
+.live-ev .chip { padding: 1px 8px; border-radius: 999px; font-size: 11.5px; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--border); }
+.live-ev .chip.k-message, .live-ev .chip.k-reply { background: var(--accent-wash); color: var(--accent-ink); }
+.live-ev .chip.k-vault_call, .live-ev .chip.k-vault_result { background: var(--n-vault); color: var(--good-ink); }
+.live-ev pre { margin: 0; max-height: 7.6em; overflow: hidden; font: 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.live-ev.open pre { max-height: none; }
+.live-ev .meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.live-ev button { justify-self: start; font-size: 12px; padding: 2px 9px; }
+.live-ev.is-err { box-shadow: inset 3px 0 0 var(--critical); padding-left: 9px; }
+.live-hint .live-all { margin-left: 6px; font: inherit; font-size: 13px; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--accent-ink); cursor: pointer; }
+.live-filters { display: grid; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--grid); }
+.live-filters[hidden], .lf-grid[hidden], .lf-f[hidden], .lf-clear[hidden] { display: none; }
+.lf-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.lf-search { position: relative; flex: 1; min-width: 0; }
+.lf-search input { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 6px 30px 6px 10px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--ink); -webkit-appearance: none; appearance: none; }
+.lf-search input::-webkit-search-cancel-button { display: none; }
+.lf-search input:focus-visible, .lf-grid select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lf-search .lf-clear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: var(--muted);
+  font-size: 13px; padding: 4px 8px; cursor: pointer; }
+.live-filters .lf-row > button, .lf-reset { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--ink); cursor: pointer; white-space: nowrap; flex: none; }
+.lf-err[aria-pressed="true"] { background: var(--critical); border-color: var(--critical); color: #fff; }
+.lf-more[aria-expanded="true"] { background: var(--accent-wash); color: var(--accent-ink); }
+.lf-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; align-items: end; }
+.lf-f { display: grid; gap: 2px; min-width: 0; font-size: 11.5px; color: var(--muted); }
+.lf-f select { width: 100%; min-width: 0; font: inherit; font-size: 13px; color: var(--ink); padding: 4px 6px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface-2); }
+.lf-reset { justify-self: start; }
+.live-sub { display: flex; gap: 8px; justify-content: space-between; }
+.ls-count { flex: none; }
+mark.lf-hit { background: color-mix(in srgb, var(--warning) 45%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.lf-none button { margin-left: 4px; font: inherit; font-size: 12px; padding: 2px 9px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--ink); cursor: pointer; }
+@media (max-width: 759px) { .lf-search input, .lf-f select { font-size: 16px; } .live.lf-open { height: 72vh; }
+  .live-filters { padding: 6px 12px; } .live-filters .lf-row > button { padding: 6px 9px; } }
+/* consolidation 2026-10-15: three-tile rows, place filter chips on Privacy, work log */
+@media (max-width: 759px) { .tiles.three .tile:last-child:nth-child(odd) { grid-column: 1 / -1; } }
+.nodechips { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 10px; }
+.nodechips button { appearance: none; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink-2); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.nodechips button:hover { border-color: var(--axis); }
+.nodechips button[aria-pressed="true"] { color: var(--ink); border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.nodechips .gsw { width: 10px; height: 10px; }
+.nodechips .g-me .gsw { background: var(--n-me); } .nodechips .g-vault .gsw { background: var(--n-vault); }
+.nodechips .g-lan .gsw { background: var(--n-lan); } .nodechips .g-cloud .gsw { background: var(--n-cloud); }
+.logpart { display: grid; gap: 6px; min-width: 0; }
+.logpart > p { margin: 0; }
+.est { display: grid; gap: 8px; padding-top: 8px; }
+</style>
+<!--/dash:head-->
+</head>
+<body>
+<!--dash:body-->
+<div class="wrap">
+  <header class="top">
+    <div class="top-row">
+      <h1>Claude Bot Dashboard</h1>
+      <span class="state" id="state"><span class="dot"></span><span id="state-text">loading</span></span>
+    </div>
+    <div class="statusline" id="statusline"></div>
+    <div class="fresh" id="fresh"></div>
+  </header>
+  <nav class="tabs" aria-label="Sections">
+    <div class="tabs-inner" role="tablist">
+      <button class="tab" role="tab" id="tab-today" data-view="today" aria-controls="view-today">Today</button>
+      <button class="tab" role="tab" id="tab-usage" data-view="usage" aria-controls="view-usage">Usage</button>
+      <button class="tab" role="tab" id="tab-activity" data-view="activity" aria-controls="view-activity">Activity</button>
+      <button class="tab" role="tab" id="tab-codebase" data-view="codebase" aria-controls="view-codebase">Codebase</button>
+      <button class="tab" role="tab" id="tab-privacy" data-view="privacy" aria-controls="view-privacy">Privacy</button>
+      <button class="tab" role="tab" id="tab-architecture" data-view="architecture" aria-controls="view-architecture">Architecture</button>
+    </div>
+  </nav>
+  <main>
+    <section class="view" id="view-today" role="tabpanel" aria-labelledby="tab-today"></section>
+    <section class="view" id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden></section>
+    <section class="view" id="view-activity" role="tabpanel" aria-labelledby="tab-activity" hidden></section>
+    <section class="view" id="view-codebase" role="tabpanel" aria-labelledby="tab-codebase" hidden></section>
+    <section class="view" id="view-privacy" role="tabpanel" aria-labelledby="tab-privacy" hidden></section>
+    <section class="view" id="view-architecture" role="tabpanel" aria-labelledby="tab-architecture" hidden></section>
+  </main>
+  <footer id="footer"></footer>
+</div>
+<template id="arch-tpl">
+<div class="grid2 arch-grid">
+<div class="panel">
+<div class="panel-head"><h2>🧩 Architecture</h2><span class="note">checked 15.10</span></div>
+<figure class="arch-fig">
+<svg class="arch arch-p" viewBox="0 0 360 836" role="img" aria-label="Architecture of the assistant. You reach the main session in the claude-bot container through Telegram and the Claude app. Everything the bot reads goes to the Anthropic API. Your private data stays in the claude-vault container: the bot gets only answers and flags, and text only after your approval in the vault bot. Cron jobs wake the bot through ~/inbox notes, reach the Unraid server over ssh and APIs, and publish this dashboard to the nginx VM.">
+<defs>
+<marker id="ax-a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 1 L9 5 L0 9 z"/></marker>
+<marker id="ax-hot" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="mk hot" d="M0 1 L9 5 L0 9 z"/></marker>
+<marker id="ax-ok" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="mk ok" d="M0 1 L9 5 L0 9 z"/></marker>
+</defs>
+
+<!-- zones (data-zone) -->
+<g data-zone="you"><rect class="z z-you" x="2" y="2" width="356" height="64" rx="10"/>
+<text class="zt" x="10" y="14">YOU</text></g>
+<g data-zone="me"><rect class="z z-me" x="20" y="80" width="220" height="358" rx="10"/>
+<text class="zt" x="28" y="94">CLAUDE-BOT · ME</text></g>
+<g data-zone="net"><rect class="z z-net" x="248" y="80" width="94" height="246" rx="10"/>
+<text class="zt" x="256" y="94">INTERNET</text></g>
+<g data-zone="vault"><rect class="z z-vault" x="20" y="456" width="220" height="250" rx="10"/>
+<line class="bnd" data-part="boundary" x1="26" y1="456" x2="234" y2="456"/>
+<text class="zt" x="232" y="470" text-anchor="end">PRIVACY VAULT</text>
+<text class="m" x="232" y="481" text-anchor="end">claude-vault container</text></g>
+<g data-zone="lan"><rect class="z z-lan" x="20" y="722" width="322" height="108" rx="10"/>
+<text class="zt" x="100" y="736">HOME NETWORK</text></g>
+
+<!-- you (data-node) -->
+<g data-node="vaultbot"><rect class="b" x="6" y="20" width="80" height="40" rx="7"/>
+<text class="l" x="46" y="36" text-anchor="middle">Vault bot</text>
+<text class="m" x="46" y="50" text-anchor="middle">approvals</text></g>
+<g data-node="telegram"><rect class="b" x="94" y="20" width="78" height="40" rx="7"/>
+<text class="l" x="133" y="36" text-anchor="middle">Telegram</text>
+<text class="m" x="133" y="50" text-anchor="middle">main bot</text></g>
+<g data-node="app"><rect class="b" x="180" y="20" width="80" height="40" rx="7"/>
+<text class="l" x="220" y="36" text-anchor="middle">Claude app</text>
+<text class="m" x="220" y="50" text-anchor="middle">Remote Control</text></g>
+<g data-node="dashboard"><rect class="b" x="268" y="20" width="86" height="40" rx="7"/>
+<text class="l" x="311" y="36" text-anchor="middle">Dashboard</text>
+<text class="m" x="311" y="50" text-anchor="middle">this page</text></g>
+
+<!-- claude-bot -->
+<g data-node="main"><rect class="b me" x="28" y="102" width="204" height="84" rx="8"/>
+<text class="l" x="36" y="119">Main session</text>
+<text class="s" x="224" y="119" text-anchor="end">Claude Code · Opus</text>
+<text class="s" x="36" y="134">plugins: telegram-plus, heartbeat</text>
+<line class="div" x1="29" y1="144" x2="231" y2="144"/>
+<text class="m" x="36" y="159">hooks check every tool call</text>
+<text class="s" x="36" y="174">vault-guard · risk-check</text></g>
+
+<g data-node="subagents"><rect class="b" x="42" y="208" width="82" height="42" rx="7"/>
+<text class="l" x="83" y="225" text-anchor="middle">Subagents</text>
+<text class="m" x="83" y="239" text-anchor="middle">delegated work</text></g>
+<g data-node="browser"><rect class="b" x="136" y="208" width="96" height="42" rx="7"/>
+<text class="l" x="184" y="225" text-anchor="middle">Browser</text>
+<text class="s" x="184" y="239" text-anchor="middle">headed Chrome</text></g>
+
+<g data-node="inbox"><rect class="b" x="42" y="272" width="82" height="42" rx="7"/>
+<text class="l" x="83" y="289" text-anchor="middle">~/inbox</text>
+<text class="s" x="83" y="303" text-anchor="middle">job notes</text></g>
+<g data-node="brain"><rect class="b" x="136" y="272" width="96" height="42" rx="7"/>
+<text class="l" x="184" y="289" text-anchor="middle">Brain git</text>
+<text class="s" x="184" y="303" text-anchor="middle">config, memory</text></g>
+
+<g data-node="vaultcli"><rect class="b" x="42" y="344" width="82" height="42" rx="7"/>
+<text class="l" x="83" y="361" text-anchor="middle">Vault CLI</text>
+<text class="m" x="83" y="375" text-anchor="middle">only way in</text></g>
+<g data-node="cron"><rect class="b" x="136" y="344" width="96" height="86" rx="7"/>
+<text class="l" x="144" y="360">Cron jobs</text>
+<text class="s" x="144" y="374">monitoring</text>
+<text class="s" x="144" y="386">media</text>
+<text class="s" x="144" y="398">money, admin</text>
+<text class="s" x="144" y="410">AI releases</text>
+<text class="s" x="144" y="422">goal loop</text></g>
+
+<!-- internet -->
+<g data-node="anthropic"><rect class="b hot" x="254" y="102" width="82" height="50" rx="7"/>
+<text class="l" x="295" y="118" text-anchor="middle">Anthropic</text>
+<text class="s" x="295" y="131" text-anchor="middle">API · Opus</text>
+<text class="s hot" x="295" y="145" text-anchor="middle">all I read</text></g>
+<g data-node="calendar"><rect class="b" x="254" y="160" width="82" height="40" rx="7"/>
+<text class="l" x="295" y="176" text-anchor="middle">Calendar</text>
+<text class="s" x="295" y="190" text-anchor="middle">Google</text></g>
+<g data-node="web"><rect class="b" x="254" y="208" width="82" height="42" rx="7"/>
+<text class="l" x="295" y="225" text-anchor="middle">Web</text>
+<text class="s" x="295" y="239" text-anchor="middle">sites, search</text></g>
+<g data-node="github"><rect class="b" x="254" y="272" width="82" height="46" rx="7"/>
+<text class="l" x="295" y="288" text-anchor="middle">GitHub</text>
+<text class="s" x="295" y="301" text-anchor="middle">private repos</text>
+<text class="m" x="295" y="313" text-anchor="middle">nightly sync</text></g>
+
+<!-- vault -->
+<g data-node="filter"><rect class="b ok" x="28" y="488" width="116" height="34" rx="7"/>
+<text class="l" x="86" y="503" text-anchor="middle">Policy filter</text>
+<text class="m" x="86" y="516" text-anchor="middle">masks private detail</text></g>
+<g data-node="feed"><rect class="b" x="160" y="488" width="72" height="34" rx="7"/>
+<text class="l" x="196" y="503" text-anchor="middle">Live feed</text>
+<text class="m" x="196" y="516" text-anchor="middle">vault-events</text></g>
+<g data-node="approvals"><rect class="b" x="28" y="542" width="96" height="40" rx="7"/>
+<text class="l" x="76" y="558" text-anchor="middle">Approvals</text>
+<text class="m" x="76" y="572" text-anchor="middle">your ✅ for text</text></g>
+<g data-node="llm"><rect class="b" x="136" y="542" width="96" height="40" rx="7"/>
+<text class="l" x="184" y="558" text-anchor="middle">Local LLM</text>
+<text class="s" x="184" y="572" text-anchor="middle">Gemma</text></g>
+<g data-node="data"><rect class="grp" x="28" y="600" width="204" height="98" rx="8"/>
+<text class="m" x="36" y="613">your private data</text>
+<g data-node="tgarchive"><rect class="b" x="36" y="620" width="90" height="32" rx="6"/>
+<text class="l" x="81" y="634" text-anchor="middle">Telegram</text>
+<text class="m" x="81" y="646" text-anchor="middle">chat archive</text></g>
+<g data-node="gmail"><rect class="b" x="134" y="620" width="90" height="32" rx="6"/>
+<text class="l" x="179" y="634" text-anchor="middle">Gmail</text>
+<text class="m" x="179" y="646" text-anchor="middle">2 accounts</text></g>
+<g data-node="paperless"><rect class="b" x="36" y="658" width="90" height="32" rx="6"/>
+<text class="l" x="81" y="672" text-anchor="middle">paperless</text>
+<text class="m" x="81" y="684" text-anchor="middle">access</text></g>
+<g data-node="firefly"><rect class="b" x="134" y="658" width="90" height="32" rx="6"/>
+<text class="l" x="179" y="672" text-anchor="middle">Firefly</text>
+<text class="m" x="179" y="684" text-anchor="middle">access</text></g></g>
+
+<!-- home network -->
+<g data-node="unraid"><rect class="b" x="28" y="744" width="236" height="78" rx="7"/>
+<text class="l" x="36" y="761">Unraid server · {{network.server_name}}</text>
+<text class="s" x="36" y="777">array + pools</text>
+<text class="s" x="36" y="790">*arr stack</text>
+<text class="s" x="36" y="803">Emby</text>
+<text class="s" x="36" y="816">paperless</text>
+<text class="s" x="146" y="777">Home Assistant</text>
+<text class="s" x="146" y="790">UniFi</text>
+<text class="s" x="146" y="803">appdata backup</text>
+<text class="s" x="146" y="816">my backups</text></g>
+<g data-node="nginx"><rect class="b" x="272" y="744" width="64" height="42" rx="7"/>
+<text class="l" x="304" y="761" text-anchor="middle">nginx VM</text>
+<text class="s" x="304" y="775" text-anchor="middle">web proxy</text></g>
+
+<!-- flows (data-edge="from-to"): you <-> me -->
+<g data-edge="telegram-main"><path class="e" d="M133 60 V102" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/>
+<text class="el" x="138" y="76">messages</text></g>
+<g data-edge="app-main"><path class="e" d="M220 60 V102" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/></g>
+<!-- vault bot rail (approvals, documents) -->
+<g data-edge="vaultbot-approvals"><path class="e c" d="M28 562 H11 V60" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/>
+<text class="el" x="16" y="76">✅/❌, documents</text></g>
+<!-- dashboard rail -->
+<g data-edge="nginx-dashboard"><path class="e" d="M336 765 H351 V60" marker-end="url(#ax-a)"/>
+<text class="el" x="346" y="76" text-anchor="end">serves this page</text></g>
+
+<!-- me <-> internet -->
+<g data-edge="main-anthropic"><path class="e hot" d="M232 124 H254" marker-start="url(#ax-hot)" marker-end="url(#ax-hot)"/></g>
+<g data-edge="main-calendar"><path class="e" d="M232 176 H254" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/></g>
+<g data-edge="browser-web"><path class="e" d="M232 229 H254" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/></g>
+<g data-edge="brain-github"><path class="e" d="M232 293 H254" marker-end="url(#ax-a)"/></g>
+
+<!-- inside me -->
+<g data-edge="main-subagents"><path class="e c" d="M83 186 V208" marker-end="url(#ax-a)"/></g>
+<g data-edge="main-browser"><path class="e c" d="M184 186 V208" marker-end="url(#ax-a)"/>
+<text class="el" x="189" y="201">drives</text></g>
+<g data-edge="inbox-main"><path class="e c" d="M42 293 H33 V186" marker-end="url(#ax-a)"/>
+<text class="el" x="37" y="201">wakes me</text></g>
+<g data-edge="cron-inbox"><path class="e" d="M150 344 V331 H83 V314" marker-end="url(#ax-a)"/>
+<text class="el" x="96" y="327">notes</text></g>
+
+<!-- privacy boundary: questions down, answers and flags up -->
+<g data-edge="vaultcli-filter"><path class="e c" d="M72 386 V488" marker-end="url(#ax-a)"/>
+<text class="el" x="67" y="449" text-anchor="end">questions</text></g>
+<g data-edge="filter-vaultcli"><path class="e ok" d="M106 488 V386" marker-end="url(#ax-ok)"/>
+<text class="el ok" x="111" y="449">answers, flags</text></g>
+<g class="lock" data-part="boundary" transform="translate(89 456)"><circle r="9"/><path class="sh" d="M-2.6 -1 V-3.4 A2.6 2.6 0 0 1 2.6 -3.4 V-1"/><rect x="-4.2" y="-1.2" width="8.4" height="6.2" rx="1.2"/></g>
+
+<!-- inside the vault -->
+<g data-edge="feed-filter"><path class="e" d="M160 505 H144" marker-end="url(#ax-a)"/></g>
+<g data-edge="filter-approvals"><path class="e c" d="M60 522 V542" marker-end="url(#ax-a)"/></g>
+<g data-edge="filter-llm"><path class="e" d="M140 522 V542" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/>
+<text class="el" x="145" y="535">asks</text></g>
+<g data-edge="data-llm"><path class="e" d="M184 600 V582" marker-end="url(#ax-a)"/>
+<text class="el" x="189" y="594">reads</text></g>
+<g data-edge="paperless-unraid"><path class="e" d="M81 690 V744" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/>
+<text class="el" x="86" y="716">API</text></g>
+
+<!-- me -> home network (cron jobs) -->
+<g data-edge="cron-nginx"><path class="e" d="M232 362 H318 V744" marker-end="url(#ax-a)"/>
+<text class="el" x="313" y="632" text-anchor="end">dashboard</text>
+<text class="el" x="313" y="644" text-anchor="end">every 5 min</text></g>
+<g data-edge="cron-unraid"><path class="e" d="M232 404 H252 V744" marker-start="url(#ax-a)" marker-end="url(#ax-a)"/>
+<text class="el" x="258" y="540">ssh, APIs,</text>
+<text class="el" x="258" y="552">backups</text></g>
+</svg>
+<svg class="arch arch-l" viewBox="0 0 1200 616" role="img" aria-label="Architecture of the assistant. You reach the main session in the claude-bot container through Telegram and the Claude app. Everything the bot reads goes to the Anthropic API. Your private data stays in the claude-vault container: the bot gets only answers and flags, and text only after your approval in the vault bot. Cron jobs wake the bot through ~/inbox notes, reach the Unraid server over ssh and APIs, and publish this dashboard to the nginx VM.">
+<defs>
+<marker id="ax-l-a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="mk" d="M0 1 L9 5 L0 9 z"/></marker>
+<marker id="ax-l-hot" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="mk hot" d="M0 1 L9 5 L0 9 z"/></marker>
+<marker id="ax-l-ok" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="mk ok" d="M0 1 L9 5 L0 9 z"/></marker>
+</defs>
+
+<!-- zones (data-zone): you | me | internet over the vault, home network along the bottom -->
+<g data-zone="you"><rect class="z z-you" x="4" y="4" width="164" height="492" rx="10"/>
+<text class="zt" x="16" y="20">YOU</text></g>
+<g data-zone="me"><rect class="z z-me" x="196" y="4" width="424" height="492" rx="10"/>
+<text class="zt" x="208" y="20">CLAUDE-BOT · ME</text></g>
+<g data-zone="net"><rect class="z z-net" x="712" y="4" width="484" height="246" rx="10"/>
+<text class="zt" x="724" y="20">INTERNET</text></g>
+<g data-zone="vault"><rect class="z z-vault" x="712" y="262" width="484" height="234" rx="10"/>
+<line class="bnd" data-part="boundary" x1="712" y1="268" x2="712" y2="490"/>
+<text class="zt" x="728" y="280">PRIVACY VAULT</text>
+<text class="m" x="728" y="293">claude-vault container</text></g>
+<g data-zone="lan"><rect class="z z-lan" x="4" y="526" width="1192" height="86" rx="10"/>
+<text class="zt" x="16" y="542">HOME NETWORK</text></g>
+
+<!-- you (data-node) -->
+<g data-node="telegram"><rect class="b" x="16" y="30" width="140" height="42" rx="7"/>
+<text class="l" x="86" y="48" text-anchor="middle">Telegram</text>
+<text class="m" x="86" y="63" text-anchor="middle">main bot</text></g>
+<g data-node="app"><rect class="b" x="16" y="82" width="140" height="42" rx="7"/>
+<text class="l" x="86" y="100" text-anchor="middle">Claude app</text>
+<text class="m" x="86" y="115" text-anchor="middle">Remote Control</text></g>
+<g data-node="vaultbot"><rect class="b" x="16" y="330" width="140" height="42" rx="7"/>
+<text class="l" x="86" y="348" text-anchor="middle">Vault bot</text>
+<text class="m" x="86" y="363" text-anchor="middle">approvals</text></g>
+<g data-node="dashboard"><rect class="b" x="16" y="440" width="140" height="42" rx="7"/>
+<text class="l" x="86" y="458" text-anchor="middle">Dashboard</text>
+<text class="m" x="86" y="473" text-anchor="middle">this page</text></g>
+
+<!-- claude-bot -->
+<g data-node="main"><rect class="b me" x="214" y="30" width="390" height="88" rx="8"/>
+<text class="l" x="226" y="50">Main session</text>
+<text class="s" x="592" y="50" text-anchor="end">Claude Code · Opus</text>
+<text class="s" x="226" y="68">plugins: telegram-plus, heartbeat</text>
+<line class="div" x1="215" y1="80" x2="603" y2="80"/>
+<text class="m" x="226" y="102">hooks check every tool call</text>
+<text class="s" x="592" y="102" text-anchor="end">vault-guard · risk-check</text></g>
+
+<g data-node="subagents"><rect class="b" x="238" y="142" width="174" height="42" rx="7"/>
+<text class="l" x="325" y="160" text-anchor="middle">Subagents</text>
+<text class="m" x="325" y="175" text-anchor="middle">delegated work</text></g>
+<g data-node="browser"><rect class="b" x="430" y="142" width="174" height="42" rx="7"/>
+<text class="l" x="517" y="160" text-anchor="middle">Browser</text>
+<text class="s" x="517" y="175" text-anchor="middle">headed Chrome</text></g>
+
+<g data-node="inbox"><rect class="b" x="238" y="200" width="174" height="42" rx="7"/>
+<text class="l" x="325" y="218" text-anchor="middle">~/inbox</text>
+<text class="s" x="325" y="233" text-anchor="middle">job notes</text></g>
+<g data-node="brain"><rect class="b" x="430" y="200" width="174" height="42" rx="7"/>
+<text class="l" x="517" y="218" text-anchor="middle">Brain git</text>
+<text class="s" x="517" y="233" text-anchor="middle">config, memory</text></g>
+
+<g data-node="cron"><rect class="b" x="238" y="334" width="174" height="80" rx="7"/>
+<text class="l" x="250" y="354">Cron jobs</text>
+<text class="s" x="250" y="373">monitoring</text>
+<text class="s" x="250" y="389">media</text>
+<text class="s" x="250" y="405">money, admin</text>
+<text class="s" x="336" y="373">AI releases</text>
+<text class="s" x="336" y="389">goal loop</text></g>
+<g data-node="vaultcli"><rect class="b" x="430" y="334" width="174" height="80" rx="7"/>
+<text class="l" x="517" y="370" text-anchor="middle">Vault CLI</text>
+<text class="m" x="517" y="386" text-anchor="middle">only way in</text></g>
+
+<!-- internet -->
+<g data-node="anthropic"><rect class="b hot" x="728" y="26" width="452" height="46" rx="7"/>
+<text class="l" x="742" y="45">Anthropic</text>
+<text class="s" x="742" y="62">API · Opus</text>
+<text class="s hot" x="1166" y="45" text-anchor="end">all I read</text></g>
+<g data-node="calendar"><rect class="b" x="728" y="80" width="452" height="40" rx="7"/>
+<text class="l" x="742" y="97">Calendar</text>
+<text class="s" x="742" y="112">Google</text></g>
+<g data-node="web"><rect class="b" x="728" y="142" width="452" height="42" rx="7"/>
+<text class="l" x="742" y="160">Web</text>
+<text class="s" x="742" y="175">sites, search</text></g>
+<g data-node="github"><rect class="b" x="728" y="200" width="452" height="42" rx="7"/>
+<text class="l" x="742" y="218">GitHub</text>
+<text class="s" x="742" y="233">private repos</text>
+<text class="m" x="1166" y="218" text-anchor="end">nightly sync</text></g>
+
+<!-- vault -->
+<g data-node="filter"><rect class="b ok" x="736" y="300" width="136" height="144" rx="7"/>
+<text class="l" x="804" y="368" text-anchor="middle">Policy filter</text>
+<text class="m" x="804" y="384" text-anchor="middle">masks private detail</text></g>
+<g data-node="feed"><rect class="b" x="906" y="300" width="116" height="36" rx="7"/>
+<text class="l" x="964" y="316" text-anchor="middle">Live feed</text>
+<text class="m" x="964" y="330" text-anchor="middle">vault-events</text></g>
+<g data-node="llm"><rect class="b" x="906" y="352" width="116" height="36" rx="7"/>
+<text class="l" x="964" y="368" text-anchor="middle">Local LLM</text>
+<text class="s" x="964" y="382" text-anchor="middle">Gemma</text></g>
+<g data-node="approvals"><rect class="b" x="906" y="404" width="116" height="40" rx="7"/>
+<text class="l" x="964" y="421" text-anchor="middle">Approvals</text>
+<text class="m" x="964" y="436" text-anchor="middle">your ✅ for text</text></g>
+<g data-node="data"><rect class="grp" x="1056" y="298" width="130" height="190" rx="8"/>
+<text class="m" x="1064" y="313">your private data</text>
+<g data-node="tgarchive"><rect class="b" x="1064" y="320" width="114" height="36" rx="6"/>
+<text class="l" x="1121" y="335" text-anchor="middle">Telegram</text>
+<text class="m" x="1121" y="350" text-anchor="middle">chat archive</text></g>
+<g data-node="gmail"><rect class="b" x="1064" y="362" width="114" height="36" rx="6"/>
+<text class="l" x="1121" y="377" text-anchor="middle">Gmail</text>
+<text class="m" x="1121" y="392" text-anchor="middle">2 accounts</text></g>
+<g data-node="firefly"><rect class="b" x="1064" y="404" width="114" height="36" rx="6"/>
+<text class="l" x="1121" y="419" text-anchor="middle">Firefly</text>
+<text class="m" x="1121" y="434" text-anchor="middle">access</text></g>
+<g data-node="paperless"><rect class="b" x="1064" y="446" width="114" height="36" rx="6"/>
+<text class="l" x="1121" y="461" text-anchor="middle">paperless</text>
+<text class="m" x="1121" y="476" text-anchor="middle">access</text></g></g>
+
+<!-- home network -->
+<g data-node="nginx"><rect class="b" x="16" y="552" width="140" height="46" rx="7"/>
+<text class="l" x="86" y="571" text-anchor="middle">nginx VM</text>
+<text class="s" x="86" y="587" text-anchor="middle">web proxy</text></g>
+<g data-node="unraid"><rect class="b" x="300" y="548" width="886" height="54" rx="7"/>
+<text class="l" x="314" y="571">Unraid server · {{network.server_name}}</text>
+<text class="s" x="540" y="569">array + pools</text>
+<text class="s" x="540" y="589">*arr stack</text>
+<text class="s" x="700" y="569">Emby</text>
+<text class="s" x="700" y="589">paperless</text>
+<text class="s" x="860" y="569">Home Assistant</text>
+<text class="s" x="860" y="589">UniFi</text>
+<text class="s" x="1020" y="569">appdata backup</text>
+<text class="s" x="1020" y="589">my backups</text></g>
+
+<!-- flows (data-edge="from-to", same names as the portrait map): you <-> me -->
+<g data-edge="telegram-main"><path class="e" d="M156 51 H214" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/>
+<text class="el" x="185" y="45" text-anchor="middle">messages</text></g>
+<g data-edge="app-main"><path class="e" d="M156 103 H214" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/></g>
+<!-- vault bot rail (approvals, documents), below the zones -->
+<g data-edge="vaultbot-approvals"><path class="e c" d="M964 444 V510 H182 V351 H156" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/>
+<text class="el" x="958" y="474" text-anchor="end">✅/❌, documents</text></g>
+<!-- dashboard -->
+<g data-edge="nginx-dashboard"><path class="e" d="M86 552 V482" marker-end="url(#ax-l-a)"/>
+<text class="el" x="92" y="516">serves this page</text></g>
+
+<!-- me <-> internet -->
+<g data-edge="main-anthropic"><path class="e hot" d="M604 46 H728" marker-start="url(#ax-l-hot)" marker-end="url(#ax-l-hot)"/></g>
+<g data-edge="main-calendar"><path class="e" d="M604 100 H728" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/></g>
+<g data-edge="browser-web"><path class="e" d="M604 163 H728" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/></g>
+<g data-edge="brain-github"><path class="e" d="M604 221 H728" marker-end="url(#ax-l-a)"/></g>
+
+<!-- inside me -->
+<g data-edge="main-subagents"><path class="e c" d="M325 118 V142" marker-end="url(#ax-l-a)"/></g>
+<g data-edge="main-browser"><path class="e c" d="M517 118 V142" marker-end="url(#ax-l-a)"/>
+<text class="el" x="523" y="134">drives</text></g>
+<g data-edge="inbox-main"><path class="e c" d="M238 221 H224 V118" marker-end="url(#ax-l-a)"/>
+<text class="el" x="230" y="195">wakes me</text></g>
+<g data-edge="cron-inbox"><path class="e" d="M325 334 V242" marker-end="url(#ax-l-a)"/>
+<text class="el" x="331" y="292">notes</text></g>
+
+<!-- privacy boundary: questions in, answers and flags out -->
+<g data-edge="vaultcli-filter"><path class="e c" d="M604 352 H736" marker-end="url(#ax-l-a)"/>
+<text class="el" x="658" y="346" text-anchor="middle">questions</text></g>
+<g data-edge="filter-vaultcli"><path class="e ok" d="M736 396 H604" marker-end="url(#ax-l-ok)"/>
+<text class="el ok" x="658" y="413" text-anchor="middle">answers, flags</text></g>
+<g class="lock" data-part="boundary" transform="translate(712 374)"><circle r="9"/><path class="sh" d="M-2.6 -1 V-3.4 A2.6 2.6 0 0 1 2.6 -3.4 V-1"/><rect x="-4.2" y="-1.2" width="8.4" height="6.2" rx="1.2"/></g>
+
+<!-- inside the vault -->
+<g data-edge="feed-filter"><path class="e" d="M906 318 H872" marker-end="url(#ax-l-a)"/></g>
+<g data-edge="filter-approvals"><path class="e c" d="M872 424 H906" marker-end="url(#ax-l-a)"/></g>
+<g data-edge="filter-llm"><path class="e" d="M872 370 H906" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/>
+<text class="el" x="889" y="364" text-anchor="middle">asks</text></g>
+<g data-edge="data-llm"><path class="e" d="M1056 370 H1022" marker-end="url(#ax-l-a)"/>
+<text class="el" x="1039" y="364" text-anchor="middle">reads</text></g>
+<g data-edge="paperless-unraid"><path class="e" d="M1121 482 V548" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/>
+<text class="el" x="1127" y="520">API</text></g>
+
+<!-- me -> home network (cron jobs) -->
+<g data-edge="cron-nginx"><path class="e" d="M258 414 V575 H156" marker-end="url(#ax-l-a)"/>
+<text class="el" x="207" y="557" text-anchor="middle">dashboard</text>
+<text class="el" x="207" y="569" text-anchor="middle">every 5 min</text></g>
+<g data-edge="cron-unraid"><path class="e" d="M392 414 V548" marker-start="url(#ax-l-a)" marker-end="url(#ax-l-a)"/>
+<text class="el" x="398" y="541">ssh, APIs, backups</text></g>
+</svg>
+<figcaption class="note">Everything I read goes to the Anthropic API. Your private data stays in the vault: I get answers and flags, and text only after your ✅ in the vault bot.</figcaption>
+</figure>
+<div class="dlegend">
+<span><svg viewBox="0 0 26 8" aria-hidden="true"><path class="lg" d="M1 4 H25"/></svg>data flow</span>
+<span><svg viewBox="0 0 26 8" aria-hidden="true"><path class="lg c" d="M1 4 H25"/></svg>control or approval</span>
+<span><svg viewBox="0 0 26 8" aria-hidden="true"><path class="lg hot" d="M1 4 H25"/></svg>sent to Anthropic</span>
+<span><svg viewBox="0 0 26 8" aria-hidden="true"><path class="lg ok" d="M1 4 H25"/></svg>answers and flags only</span>
+<span><svg class="lglock" viewBox="-10 -10 20 20" aria-hidden="true"><g class="lock"><circle r="9"/><path class="sh" d="M-2.6 -1 V-3.4 A2.6 2.6 0 0 1 2.6 -3.4 V-1"/><rect x="-4.2" y="-1.2" width="8.4" height="6.2" rx="1.2"/></g></svg>privacy boundary</span>
+</div>
+<div class="dlegend">
+<span><i class="gsw" style="background:var(--quiet)"></i>you</span>
+<span><i class="gsw" style="background:var(--n-me)"></i>this bot</span>
+<span><i class="gsw" style="background:var(--n-vault)"></i>privacy vault</span>
+<span><i class="gsw" style="background:var(--n-cloud)"></i>internet</span>
+<span><i class="gsw" style="background:var(--n-lan)"></i>home network</span>
+</div>
+</div>
+<div class="panel">
+<div class="panel-head"><h2>How it works</h2></div>
+<ul class="arch-notes">
+<li><b>Waking up:</b> cron jobs leave notes in ~/inbox; hb-gate decides when the heartbeat wakes me.</li>
+<li><b>Guards:</b> every tool call passes two hooks: vault-guard (no way around the vault) and risk-check (blocks risky commands).</li>
+<li><b>Privacy:</b> the vault's local LLM answers inside the vault. Text and exact details leave only after your ✅ in the vault bot.</li>
+<li><b>Documents</b> you send to the vault bot are filed into paperless without passing me.</li>
+<li><b>Alerts</b> that need no thinking go to you straight from scripts, without tokens.</li>
+<li><b>My setup</b> is snapshotted to brain git every 30 min, backed up to the server nightly and synced to a private GitHub repo.</li>
+<li><b>Calendar</b> goes through the claude.ai connector.</li>
+</ul>
+</div>
+</div>
+</template>
+<script id="dash-data" type="application/json" data-mode="fallback">{}</script>
+<script>
+(function () {
+  'use strict';
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  var VIEWS = ['today', 'usage', 'activity', 'codebase', 'privacy', 'architecture'];
+  // tabs before the 2026-10-15 consolidation: old bookmarks and the stored last tab land on their new home
+  var VIEW_ALIAS = { overview: 'today', tokens: 'usage', health: 'today', assistant: 'codebase', growth: 'codebase', data: 'privacy' };
+  function viewOf(x) { return VIEW_ALIAS[x] || x; }
+  var KINDS = [
+    { key: 'main', label: 'Main session', color: 'var(--s1)' },
+    { key: 'subagent', label: 'Subagents', color: 'var(--s2)' },
+    { key: 'headless', label: 'Headless workers', color: 'var(--s3)' }
+  ];
+  var COSTS = [
+    { key: 'input', label: 'Input', color: 'var(--s1)' },
+    { key: 'cache_write', label: 'Cache write', color: 'var(--s2)' },
+    { key: 'cache_read', label: 'Cache read', color: 'var(--s3)' },
+    { key: 'output', label: 'Output', color: 'var(--s4)' }
+  ];
+  var D = null;
+  var charts = {};       // view -> [render fns]
+  var current = 'today';
+  var MODES = { usage: 'hourly', cost: 'source', runs: 'top', growth: 'stacked', worklog: null };   // segmented toggles
+  var selectedNode = null;
+
+  // ---------------------------------------------------------------- helpers
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (attrs[k] == null || attrs[k] === false) continue;
+      if (k === 'class') el.className = attrs[k];
+      else if (k === 'text') el.textContent = attrs[k];
+      else if (k.slice(0, 2) === 'on') el.addEventListener(k.slice(2), attrs[k]);
+      else el.setAttribute(k, attrs[k] === true ? '' : attrs[k]);
+    }
+    for (var i = 2; i < arguments.length; i++) add(el, arguments[i]);
+    return el;
+  }
+  function add(el, c) {
+    if (c == null || c === false) return;
+    if (Array.isArray(c)) { c.forEach(function (x) { add(el, x); }); return; }
+    el.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+  }
+  function s(tag, attrs) {
+    var el = document.createElementNS(SVGNS, tag);
+    if (attrs) for (var k in attrs) {
+      if (attrs[k] == null) continue;
+      if (k === 'text') el.textContent = attrs[k];
+      else if (k === 'style') el.setAttribute('style', attrs[k]);
+      else el.setAttribute(k, attrs[k]);
+    }
+    for (var i = 2; i < arguments.length; i++) if (arguments[i]) el.appendChild(arguments[i]);
+    return el;
+  }
+  function fmtN(n) {
+    n = Number(n) || 0;
+    var a = Math.abs(n);
+    function f(x, unit) { return (x >= 100 ? Math.round(x) : x >= 10 ? x.toFixed(1).replace(/\.0$/, '') : x.toFixed(2).replace(/\.?0+$/, '')) + unit; }
+    if (a >= 1e9) return f(n / 1e9, 'B');
+    if (a >= 1e6) return f(n / 1e6, 'M');
+    if (a >= 1e3) return f(n / 1e3, 'K');
+    return String(Math.round(n));
+  }
+  function fmtInt(n) { return (Number(n) || 0).toLocaleString('en-US'); }
+  function fmtUSD(x) {
+    x = Number(x) || 0;
+    if (x >= 100) return '$' + Math.round(x).toLocaleString('en-US');
+    if (x >= 0.995) return '$' + x.toFixed(2);
+    if (x === 0) return '$0';
+    return '$' + (x < 0.01 ? x.toFixed(3) : x.toFixed(2));
+  }
+  function pct(a, b) { return b ? Math.round(a / b * 1000) / 10 : 0; }
+  function sum(o) { var t = 0; for (var k in o) t += Number(o[k]) || 0; return t; }
+  function dayLabel(iso) {
+    var d = new Date(iso + 'T12:00:00');
+    return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+  }
+  function shortDay(iso) {
+    var d = new Date(iso + 'T12:00:00');
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  }
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    var p = Math.pow(10, Math.floor(Math.log10(v)));
+    var steps = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * p >= v) return steps[i] * p;
+    return 10 * p;
+  }
+  function chip(text, cls, ico) { return h('span', { class: 'chip ' + (cls || '') }, ico ? h('span', { class: 'ico', 'aria-hidden': 'true', text: ico }) : null, text); }
+  var STATUS = { ok: ['OK', 'ok', '✓'], warn: ['Check', 'warn', '▲'], critical: ['Problem', 'critical', '✕'], unknown: ['Unknown', '', '?'] };
+  function statusChip(st) { var x = STATUS[st] || STATUS.unknown; return chip(x[0], x[1], x[2]); }
+  var SENS = { low: ['Low', '', '○'], medium: ['Medium', 'warn', '◐'], high: ['High', 'serious', '●'], critical: ['Critical', 'critical', '◆'] };
+  function sensChip(l) { var x = SENS[l] || SENS.low; return chip(x[0], x[1], x[2]); }
+  function panel(title, right) {
+    var p = h('div', { class: 'panel' });
+    if (title) p.appendChild(h('div', { class: 'panel-head' }, h('h2', { text: title }), right || null));
+    return p;
+  }
+  function tableOf(cols, rows) {
+    var t = h('table');
+    t.appendChild(h('thead', null, h('tr', null, cols.map(function (c) { return h('th', { class: c.n ? 'n' : null, text: c.label }); }))));
+    var tb = h('tbody');
+    rows.forEach(function (r) {
+      tb.appendChild(h('tr', null, cols.map(function (c, i) { return h('td', { class: c.n ? 'n' : null, text: r[i] }); })));
+    });
+    t.appendChild(tb);
+    return h('div', { class: 'tablewrap' }, t);
+  }
+  function details(label, content) { return h('details', { class: 'table' }, h('summary', { text: label }), content); }
+  function onChart(view, fn) { (charts[view] = charts[view] || []).push(fn); }
+
+  // ---------------------------------------------------------------- column chart (stacked, inline SVG)
+  function columnChart(host, opt) {
+    host.textContent = '';
+    var W = Math.max(280, Math.floor(host.clientWidth || 320));
+    var H = opt.height || 200, L = 44, R = 6, T = 10, B = 26;
+    var n = opt.rows.length;
+    var band = (W - L - R) / Math.max(1, n);
+    var bw = Math.max(2, Math.min(24, band - 2, band * 0.72));
+    var totals = opt.rows.map(function (r) { return opt.series.reduce(function (a, se) { return a + (r.values[se.key] || 0); }, 0); });
+    var max = niceMax(Math.max.apply(null, totals.concat([opt.refLine ? opt.refLine.value || 0 : 0])) || 1);
+    var y = function (v) { return T + (H - T - B) * (1 - v / max); };
+    var svg = s('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img', tabindex: '0',
+      'aria-label': opt.aria || 'chart' });
+    for (var i = 0; i < n; i++) {
+      if (opt.shade && opt.shade(i)) svg.appendChild(s('rect', { x: L + i * band, y: T, width: band + 0.5, height: H - T - B, style: 'fill:var(--quiet)' }));
+    }
+    [0, 0.5, 1].forEach(function (f) {
+      var v = max * f, yy = Math.round(y(v)) + 0.5;
+      svg.appendChild(s('line', { x1: L, x2: W - R, y1: yy, y2: yy, style: 'stroke:' + (f === 0 ? 'var(--axis)' : 'var(--grid)') + ';stroke-width:1' }));
+      svg.appendChild(s('text', { x: L - 6, y: yy + 4, 'text-anchor': 'end', style: 'fill:var(--muted);font:11px var(--font-ui);font-variant-numeric:tabular-nums', text: opt.yFmt(v) }));
+    });
+    var hover = s('rect', { x: 0, y: T, width: band, height: H - T - B, style: 'fill:var(--ink);opacity:0', rx: 3 });
+    svg.appendChild(hover);
+    opt.rows.forEach(function (r, i) {
+      var cx = L + i * band + band / 2, base = y(0), acc = 0, segs = [];
+      opt.series.forEach(function (se) { var v = r.values[se.key] || 0; if (v > 0) segs.push([se, v]); });
+      segs.forEach(function (sv, j) {
+        var y0 = y(acc), y1 = y(acc + sv[1]);
+        acc += sv[1];
+        if (j > 0) y0 -= 2;                     // 2px surface gap between stacked segments
+        var hgt = y0 - y1;
+        if (hgt < 0.6) return;
+        var x0 = cx - bw / 2, top = j === segs.length - 1, rr = Math.min(4, hgt, bw / 2);
+        var d = top
+          ? 'M' + x0 + ' ' + y0 + 'V' + (y1 + rr) + 'Q' + x0 + ' ' + y1 + ' ' + (x0 + rr) + ' ' + y1 + 'H' + (x0 + bw - rr) + 'Q' + (x0 + bw) + ' ' + y1 + ' ' + (x0 + bw) + ' ' + (y1 + rr) + 'V' + y0 + 'Z'
+          : 'M' + x0 + ' ' + y0 + 'V' + y1 + 'H' + (x0 + bw) + 'V' + y0 + 'Z';
+        svg.appendChild(s('path', { d: d, style: 'fill:' + sv[0].color }));
+      });
+      void base;
+      var tick = opt.xTick(i);
+      if (tick) svg.appendChild(s('text', { x: cx, y: H - 8, 'text-anchor': 'middle', style: 'fill:var(--muted);font:11px var(--font-ui)', text: tick }));
+    });
+    if (opt.refLine && opt.refLine.value > 0) {
+      var ry = Math.round(y(opt.refLine.value)) + 0.5;
+      svg.appendChild(s('line', { x1: L, x2: W - R, y1: ry, y2: ry, style: 'stroke:var(--ink-2);stroke-width:1.5;stroke-dasharray:5 4' }));
+      svg.appendChild(s('text', { x: L + 4, y: ry - 5, style: 'fill:var(--ink-2);font:600 11px var(--font-ui);paint-order:stroke;stroke:var(--surface);stroke-width:3px;stroke-linejoin:round', text: opt.refLine.label }));
+    }
+    var hit = s('rect', { x: L, y: 0, width: W - L - R, height: H, style: 'fill:transparent' });
+    svg.appendChild(hit);
+    var tip = h('div', { class: 'tip', hidden: true });
+    var idx = -1;
+    function show(i) {
+      if (i < 0 || i >= n) return;
+      idx = i;
+      var r = opt.rows[i];
+      hover.setAttribute('x', L + i * band); hover.setAttribute('width', band); hover.style.opacity = 0.06;
+      tip.textContent = '';
+      tip.appendChild(h('div', { class: 't', text: opt.tipTitle(i) }));
+      opt.series.slice().reverse().forEach(function (se) {
+        tip.appendChild(h('div', { class: 'r' }, h('span', { class: 'k', style: 'background:' + se.color }), h('b', { text: opt.yFmtFull(r.values[se.key] || 0) }), h('span', { text: se.label })));
+      });
+      if (opt.series.length > 1) tip.appendChild(h('div', { class: 'r' }, h('span'), h('b', { text: opt.yFmtFull(totals[i]) }), h('span', { text: 'total' })));
+      if (opt.tipExtra) { var ex = opt.tipExtra(i); if (ex) tip.appendChild(h('div', { class: 'r' }, h('span'), h('span', { text: ex, style: 'grid-column: 2 / -1; color: var(--muted)' }))); }
+      tip.hidden = false;
+      var scale = host.clientWidth / W;
+      var px = (L + i * band + band / 2) * scale;
+      var tw = tip.offsetWidth;
+      var left = px + 12;
+      if (left + tw > host.clientWidth) left = px - 12 - tw;
+      tip.style.left = Math.max(0, left) + 'px';
+      tip.style.top = '4px';
+    }
+    function hide() { tip.hidden = true; hover.style.opacity = 0; }
+    function fromEvent(e) {
+      var rect = svg.getBoundingClientRect();
+      var x = (e.clientX - rect.left) * (W / rect.width);
+      return Math.floor((x - L) / band);
+    }
+    svg.addEventListener('pointermove', function (e) { show(fromEvent(e)); });
+    svg.addEventListener('pointerdown', function (e) { show(fromEvent(e)); });
+    svg.addEventListener('pointerleave', hide);
+    svg.addEventListener('focus', function () { show(idx >= 0 ? idx : n - 1); });
+    svg.addEventListener('blur', hide);
+    svg.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight') { show(Math.min(n - 1, idx + 1)); e.preventDefault(); }
+      if (e.key === 'ArrowLeft') { show(Math.max(0, idx - 1)); e.preventDefault(); }
+    });
+    host.appendChild(svg);
+    host.appendChild(tip);
+  }
+  // ---------------------------------------------------------------- line / stacked-area chart over days (inline SVG)
+  // opt: rows [{values: {key: n}}], series [{key, label, color}], stacked, area (fill under a single line), mini,
+  //      height, yFmt, yFmtFull, xLabel(i), tipTitle(i), endLabels (direct labels at the right end), aria
+  function lineChart(host, opt) {
+    host.textContent = '';
+    var mini = !!opt.mini, se = opt.series, rows = opt.rows, n = rows.length;
+    var W = Math.max(mini ? 120 : 280, Math.floor(host.clientWidth || 320));
+    var H = opt.height || (mini ? 96 : 210), L = mini ? 32 : 44, T = mini ? 8 : 10, B = mini ? 20 : 26;
+    var R = opt.endLabels ? 76 : (mini ? 8 : 12);
+    var x = function (i) { return n <= 1 ? (L + W - R) / 2 : L + (W - L - R) * i / (n - 1); };
+    var vals = rows.map(function (r) {     // per row: plotted value per series (cumulative when stacked)
+      var acc = 0;
+      return se.map(function (k) {
+        var v = r.values[k.key];
+        if (opt.stacked) { acc += v || 0; return acc; }
+        return v == null ? null : v;
+      });
+    });
+    var all = [0];
+    vals.forEach(function (a) { a.forEach(function (v) { if (v != null) all.push(v); }); });
+    var max = niceMax(Math.max.apply(null, all) || 1);
+    var y = function (v) { return T + (H - T - B) * (1 - v / max); };
+    var svg = s('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img', tabindex: '0', 'aria-label': opt.aria || 'chart' });
+    (mini ? [0, 1] : [0, 0.5, 1]).forEach(function (f) {
+      var v = max * f, yy = Math.round(y(v)) + 0.5;
+      svg.appendChild(s('line', { x1: L, x2: W - R, y1: yy, y2: yy, style: 'stroke:' + (f === 0 ? 'var(--axis)' : 'var(--grid)') + ';stroke-width:1' }));
+      svg.appendChild(s('text', { x: L - 6, y: yy + 4, 'text-anchor': 'end', style: 'fill:var(--muted);font:' + (mini ? '10px' : '11px') + ' var(--font-ui);font-variant-numeric:tabular-nums', text: opt.yFmt(v) }));
+    });
+    // x labels: always the last day, then every `step` days back from it, never crowded
+    var maxT = Math.max(2, Math.floor((W - L - R) / (mini ? 64 : 62)) + 1);
+    var step = Math.max(1, Math.ceil((n - 1) / (maxT - 1)));
+    for (var i = 0; i < n; i++) {
+      if ((n - 1 - i) % step !== 0) continue;
+      var lab = opt.xLabel(i);
+      if (!lab) continue;
+      var anchor = n > 1 && i === n - 1 && !opt.endLabels ? 'end' : (n > 1 && i === 0 ? 'start' : 'middle');
+      svg.appendChild(s('text', { x: x(i), y: H - 6, 'text-anchor': anchor, style: 'fill:var(--muted);font:' + (mini ? '10px' : '11px') + ' var(--font-ui)', text: lab }));
+    }
+    function pts(j, lower) {
+      var out = [];
+      for (var i = 0; i < n; i++) {
+        var v = lower ? (j > 0 ? vals[i][j - 1] : 0) : vals[i][j];
+        if (v != null) out.push([x(i), y(v)]);
+      }
+      return out;
+    }
+    function d(p) { return p.map(function (q, k) { return (k ? 'L' : 'M') + q[0].toFixed(1) + ' ' + q[1].toFixed(1); }).join(''); }
+    if (opt.stacked) {
+      se.forEach(function (k, j) {
+        var up = pts(j, false), lo = pts(j, true).reverse();
+        if (n === 1) { up = [[x(0) - 6, up[0][1]], [x(0) + 6, up[0][1]]]; lo = [[x(0) + 6, lo[0][1]], [x(0) - 6, lo[0][1]]]; }
+        svg.appendChild(s('path', { d: d(up.concat(lo)) + 'Z', style: 'fill:' + k.color }));
+      });
+      se.forEach(function (k, j) {      // 1.5px surface gap between stacked bands
+        if (j < se.length - 1) svg.appendChild(s('path', { d: d(pts(j, false)), style: 'fill:none;stroke:var(--surface);stroke-width:1.5;stroke-linejoin:round' }));
+      });
+    } else {
+      se.forEach(function (k, j) {
+        var p = pts(j, false);
+        if (!p.length) return;
+        if (opt.area && p.length > 1) {
+          svg.appendChild(s('path', { d: d(p) + 'L' + p[p.length - 1][0].toFixed(1) + ' ' + y(0) + 'L' + p[0][0].toFixed(1) + ' ' + y(0) + 'Z',
+            style: 'fill:' + k.color + ';opacity:0.12' }));
+        }
+        if (p.length > 1) svg.appendChild(s('path', { d: d(p), style: 'fill:none;stroke:' + k.color + ';stroke-width:2;stroke-linejoin:round;stroke-linecap:round' }));
+        if (n <= 31) p.forEach(function (q) {
+          svg.appendChild(s('circle', { cx: q[0], cy: q[1], r: mini ? 3 : 3.5, style: 'fill:' + k.color + ';stroke:var(--surface);stroke-width:1.5' }));
+        });
+      });
+      if (opt.endLabels && n) {           // direct labels at the right end, pushed apart so they never overlap
+        var labs = se.map(function (k, j) { return { k: k, yy: vals[n - 1][j] == null ? null : y(vals[n - 1][j]) }; })
+          .filter(function (o) { return o.yy != null; }).sort(function (a, b) { return a.yy - b.yy; });
+        for (var q = 1; q < labs.length; q++) if (labs[q].yy - labs[q - 1].yy < 13) labs[q].yy = labs[q - 1].yy + 13;
+        labs.forEach(function (o) {
+          svg.appendChild(s('text', { x: x(n - 1) + 8, y: o.yy + 4, style: 'fill:var(--ink-2);font:11px var(--font-ui)', text: o.k.short || o.k.label }));
+        });
+      }
+    }
+    var cross = s('line', { x1: 0, x2: 0, y1: T, y2: H - B, style: 'stroke:var(--ink-2);stroke-width:1;opacity:0' });
+    svg.appendChild(cross);
+    var dots = se.map(function (k) {
+      var c = s('circle', { cx: 0, cy: 0, r: mini ? 3.5 : 4.5, style: 'fill:' + k.color + ';stroke:var(--surface);stroke-width:2;opacity:0' });
+      svg.appendChild(c);
+      return c;
+    });
+    svg.appendChild(s('rect', { x: 0, y: 0, width: W, height: H, style: 'fill:transparent' }));
+    var tip = h('div', { class: 'tip' + (mini ? ' compact' : ''), hidden: true });
+    var idx = -1;
+    function show(i) {
+      if (i < 0 || i >= n) return;
+      idx = i;
+      var cx = x(i);
+      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); cross.style.opacity = 0.35;
+      se.forEach(function (k, j) {
+        var v = vals[i][j];
+        if (v == null) { dots[j].style.opacity = 0; return; }
+        dots[j].setAttribute('cx', cx); dots[j].setAttribute('cy', y(v)); dots[j].style.opacity = 1;
+      });
+      tip.textContent = '';
+      tip.appendChild(h('div', { class: 't', text: opt.tipTitle(i) }));
+      var order = opt.stacked ? se.slice().reverse() : se;
+      order.forEach(function (k) {
+        var v = rows[i].values[k.key];
+        tip.appendChild(h('div', { class: 'r' }, h('span', { class: 'k', style: 'background:' + k.color }), h('b', { text: v == null ? '–' : opt.yFmtFull(v) }),
+          h('span', { text: se.length > 1 ? k.label : '' })));
+      });
+      if (opt.stacked && se.length > 1) tip.appendChild(h('div', { class: 'r' }, h('span'), h('b', { text: opt.yFmtFull(vals[i][se.length - 1]) }), h('span', { text: 'total' })));
+      tip.hidden = false;
+      var hr = host.getBoundingClientRect(), vw = document.documentElement.clientWidth;
+      var px = cx * (host.clientWidth / W), tw = tip.offsetWidth;
+      var left = px + 12;
+      if (hr.left + left + tw > vw - 4) left = px - 12 - tw;
+      left = Math.max(4 - hr.left, Math.min(left, vw - 4 - hr.left - tw));
+      tip.style.left = left + 'px';
+      tip.style.top = (mini ? 18 : 4) + 'px';
+    }
+    function hide() { tip.hidden = true; cross.style.opacity = 0; dots.forEach(function (c) { c.style.opacity = 0; }); }
+    function fromEvent(e) {
+      var rect = svg.getBoundingClientRect(), px = (e.clientX - rect.left) * (W / rect.width);
+      return n <= 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round((px - L) / ((W - L - R) / (n - 1)))));
+    }
+    svg.addEventListener('pointermove', function (e) { show(fromEvent(e)); });
+    svg.addEventListener('pointerdown', function (e) { show(fromEvent(e)); });
+    svg.addEventListener('pointerleave', hide);
+    svg.addEventListener('focus', function () { show(idx >= 0 ? idx : n - 1); });
+    svg.addEventListener('blur', hide);
+    svg.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight') { show(Math.min(n - 1, idx + 1)); e.preventDefault(); }
+      if (e.key === 'ArrowLeft') { show(Math.max(0, idx - 1)); e.preventDefault(); }
+    });
+    host.appendChild(svg);
+    host.appendChild(tip);
+  }
+  // ---------------------------------------------------------------- 24 h timeline (runs as bars, owner messages as dots)
+  function hhmm(iso) { return String(iso || '').slice(11, 16); }
+  function timelineChart(host, tl) {
+    host.textContent = '';
+    var W = Math.max(280, Math.floor(host.clientWidth || 320));
+    var L = 6, R = 6, T = 2, AX = 20, OW = 28, RH = 26;
+    var t0 = Date.parse(tl.from), t1 = Date.parse(tl.to), span = Math.max(1, t1 - t0);
+    var runs = tl.runs || [], msgs = tl.owner_messages || [];
+    var H = T + AX + OW + runs.length * RH + 4;
+    var x = function (ms) { return L + (W - L - R) * Math.min(1, Math.max(0, (ms - t0) / span)); };
+    var m = /([+-])(\d\d):(\d\d)$/.exec(tl.to || ''), off = m ? (m[1] === '-' ? -1 : 1) * (+m[2] * 60 + +m[3]) * 60000 : 0;
+    var top = T + AX, bottom = H - 2;
+    var svg = s('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img', tabindex: '0',
+      'aria-label': 'Timeline of the last 24 hours: ' + runs.length + ' agent runs as bars, ' + msgs.length + ' messages from you as dots' });
+    // quiet hours 00-08 (Zurich) and hour grid every 3 h
+    var HOUR = 3600000, firstH = Math.ceil((t0 + off) / HOUR) * HOUR - off;
+    for (var hm = firstH - 24 * HOUR; hm <= t1; hm += HOUR) {
+      var lh = new Date(hm + off).getUTCHours();
+      if (lh === 0) {
+        var qa = x(hm), qb = x(hm + 8 * HOUR);
+        if (qb > qa) svg.appendChild(s('rect', { x: qa, y: top, width: qb - qa, height: bottom - top, style: 'fill:var(--quiet)' }));
+      }
+      if (hm < t0 || lh % 3) continue;
+      var gx = Math.round(x(hm)) + 0.5;
+      svg.appendChild(s('line', { x1: gx, x2: gx, y1: top, y2: bottom, style: 'stroke:var(--grid);stroke-width:1' }));
+      var lbl = lh === 0 ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(hm + off).getUTCDay()] : String(lh).padStart(2, '0');
+      if (gx > L + 10 && gx < W - R - 26) svg.appendChild(s('text', { x: gx, y: T + 13, 'text-anchor': 'middle', style: 'fill:var(--muted);font:' + (lh === 0 ? '600 ' : '') + '11px var(--font-ui)', text: lbl }));
+    }
+    svg.appendChild(s('line', { x1: L, x2: W - R, y1: top + 0.5, y2: top + 0.5, style: 'stroke:var(--axis);stroke-width:1' }));
+    svg.appendChild(s('text', { x: W - R, y: T + 13, 'text-anchor': 'end', style: 'fill:var(--ink-2);font:600 11px var(--font-ui)', text: 'now' }));
+    // owner messages
+    svg.appendChild(s('text', { x: L, y: top + 12, style: 'fill:var(--muted);font:11px var(--font-ui)', text: 'You' }));
+    msgs.forEach(function (o) {
+      svg.appendChild(s('circle', { cx: x(Date.parse(o.at)), cy: top + OW / 2 + 3, r: 4.5, style: 'fill:var(--s4);stroke:var(--surface);stroke-width:1.5' }));
+    });
+    svg.appendChild(s('line', { x1: L, x2: W - R, y1: top + OW + 0.5, y2: top + OW + 0.5, style: 'stroke:var(--grid);stroke-width:1' }));
+    // runs, one row each
+    var hover = s('rect', { x: 0, y: 0, width: W, height: RH, style: 'fill:var(--ink);opacity:0', rx: 3 });
+    svg.appendChild(hover);
+    var CH = 6.1;   // approx. px per character at 11px
+    runs.forEach(function (r, i) {
+      var y0 = top + OW + i * RH;
+      var xs = x(Date.parse(r.start)), xe = Math.max(xs + 4, x(Date.parse(r.end)));
+      var col = r.kind === 'headless' ? 'var(--s3)' : 'var(--s2)';
+      svg.appendChild(s('rect', { x: xs, y: y0 + 16, width: xe - xs, height: 6, rx: 2, style: 'fill:' + col }));
+      var endAnchor = xs > (W - L - R) * 0.55, ax = endAnchor ? Math.min(xe, W - R) : xs;
+      var room = endAnchor ? ax - L : W - R - ax, maxc = Math.max(6, Math.floor(room / CH));
+      var txt = r.description.length > maxc ? r.description.slice(0, maxc - 1).replace(/\s+\S*$/, '') + '…' : r.description;
+      svg.appendChild(s('text', { x: ax, y: y0 + 12, 'text-anchor': endAnchor ? 'end' : 'start', style: 'fill:var(--ink);font:11px var(--font-ui)', text: txt }));
+    });
+    svg.appendChild(s('rect', { x: 0, y: 0, width: W, height: H, style: 'fill:transparent' }));
+    var tip = h('div', { class: 'tip', hidden: true });
+    var idx = -1;
+    function place(px, py) {
+      tip.hidden = false;
+      var tw = tip.offsetWidth, left = px + 12;
+      if (left + tw > host.clientWidth) left = px - 12 - tw;
+      tip.style.left = Math.max(0, left) + 'px';
+      tip.style.top = Math.max(0, py) + 'px';
+    }
+    function showRun(i) {
+      if (i < 0 || i >= runs.length) return;
+      idx = i;
+      var r = runs[i], scale = host.clientWidth / W, y0 = top + OW + i * RH;
+      hover.setAttribute('y', y0); hover.style.opacity = 0.06;
+      tip.textContent = '';
+      tip.appendChild(h('div', { class: 't', text: hhmm(r.start) + '–' + hhmm(r.end) + ' · ' + (r.minutes < 1 ? '<1' : Math.round(r.minutes)) + ' min' }));
+      tip.appendChild(h('div', { text: r.description, style: 'max-width:240px' }));
+      tip.appendChild(h('div', { class: 'muted', text: [r.kind === 'subagent' ? r.agent_type : 'headless worker', r.effort ? 'effort ' + r.effort : null, '≈ ' + fmtUSD(r.cost_usd)].filter(Boolean).join(' · ') }));
+      place(x(Date.parse(r.end)) * scale, (y0 + RH) * scale);
+    }
+    function showMsgs(px) {
+      var ms = t0 + (px - L) / (W - L - R) * span, near = msgs.filter(function (o) { return Math.abs(Date.parse(o.at) - ms) < span / 24; });
+      if (!near.length) { hide(); return; }
+      hover.style.opacity = 0; idx = -1;
+      tip.textContent = '';
+      tip.appendChild(h('div', { class: 't', text: near.length + ' message' + (near.length > 1 ? 's' : '') + ' from you' }));
+      tip.appendChild(h('div', { text: near.slice(0, 8).map(function (o) { return hhmm(o.at) + (o.via === 'app' ? ' (app)' : ''); }).join(', ') + (near.length > 8 ? ' …' : '') }));
+      place(px * host.clientWidth / W, (top + OW) * host.clientWidth / W);
+    }
+    function hide() { tip.hidden = true; hover.style.opacity = 0; }
+    function at(e) {
+      var rect = svg.getBoundingClientRect(), k = W / rect.width;
+      var px = (e.clientX - rect.left) * k, py = (e.clientY - rect.top) * k;
+      if (py >= top && py < top + OW) showMsgs(px);
+      else if (py >= top + OW) showRun(Math.floor((py - top - OW) / RH));
+      else hide();
+    }
+    svg.addEventListener('pointermove', at);
+    svg.addEventListener('pointerdown', at);
+    svg.addEventListener('pointerleave', hide);
+    svg.addEventListener('focus', function () { showRun(idx >= 0 ? idx : runs.length - 1); });
+    svg.addEventListener('blur', hide);
+    svg.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown') { showRun(Math.min(runs.length - 1, idx + 1)); e.preventDefault(); }
+      if (e.key === 'ArrowUp') { showRun(Math.max(0, idx - 1)); e.preventDefault(); }
+    });
+    host.appendChild(svg);
+    host.appendChild(tip);
+  }
+  function legend(series, extra) {
+    return h('div', { class: 'legend' }, series.map(function (se) {
+      return h('span', null, h('i', { class: 'sw', style: 'background:' + se.color }), se.label);
+    }), extra || null);
+  }
+  function rankBars(items, opt) {
+    var max = Math.max.apply(null, items.map(function (x) { return opt.value(x); }).concat([1]));
+    return h('div', { class: 'bars' }, items.map(function (x) {
+      var v = opt.value(x);
+      return h('div', { class: 'bar-row' },
+        h('div', { class: 'bar-top' }, h('span', { class: 'name', text: opt.name(x) }), h('span', { class: 'val', text: opt.label(x) })),
+        opt.meta ? h('div', { class: 'bar-meta' }, opt.meta(x)) : null,
+        h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + Math.max(0.5, v / max * 100) + '%' })));
+    }));
+  }
+
+  // ---------------------------------------------------------------- header
+  function renderHeader() {
+    var now = D.now || {};
+    var st = document.getElementById('state');
+    var working = now.mode && now.mode !== 'idle';
+    st.className = 'state' + (working ? ' working' : '');
+    document.getElementById('state-text').textContent = (working ? 'Working' : 'Idle') + (now.since ? ' since ' + now.since : '');
+    document.getElementById('statusline').textContent = now.header || '';
+    updateFresh();
+  }
+  function updateFresh() {
+    var el = document.getElementById('fresh');
+    if (!D) return;
+    var age = (Date.now() - new Date(D.generated_at).getTime()) / 60000;
+    var txt = 'Data from ' + D.generated_local + ' (Zurich)';
+    if (age >= 1) txt += ', ' + (age < 90 ? Math.round(age) + ' min ago' : Math.round(age / 60) + ' h ago');
+    el.textContent = txt;
+    el.className = 'fresh' + (age > 30 ? ' stale' : '');
+  }
+
+  // ---------------------------------------------------------------- shared card helpers (consolidation 2026-10-15)
+  // One tile for every tab: label, big value, optional sub line, extra nodes (chips, sparkline), extra class.
+  function tile(label, value, sub, extra, cls) {
+    return h('div', { class: 'tile' + (cls ? ' ' + cls : '') }, h('span', { class: 'label', text: label }),
+      h('span', { class: 'value tnum', text: value }), extra || null, sub ? h('span', { class: 'sub', text: sub }) : null);
+  }
+  function tileRow(list, cls) { return h('div', { class: 'tiles' + (cls ? ' ' + cls : '') }, list); }
+  // One segmented toggle: opts = [[key, label], ...]; the chosen key lives in MODES[name] (kept across refreshes).
+  function segToggle(name, aria, opts, onChange) {
+    var btns = opts.map(function (o) {
+      return h('button', { type: 'button', text: o[1], 'aria-pressed': String(MODES[name] === o[0]), onclick: function () {
+        MODES[name] = o[0];
+        btns.forEach(function (b, i) { b.setAttribute('aria-pressed', String(opts[i][0] === o[0])); });
+        onChange();
+      } });
+    });
+    return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, btns);
+  }
+  function chartTable(cols, rows) { return details('Table', tableOf(cols, rows)); }
+  // x ticks for a day series: every Nth day counted back from the last, so the newest day always has a label
+  function dayTicks(dates, n) {
+    var step = Math.max(1, Math.ceil(dates.length / n));
+    return function (i) { return (dates.length - 1 - i) % step === 0 ? shortDay(dates[i]) : null; };
+  }
+  function plural(n, one, many) { return fmtInt(n) + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function nItems(n) { return plural(n, 'item'); }
+  function sign(d, f) { return (d > 0 ? '+' : d < 0 ? '−' : '±') + (f || fmtN)(Math.abs(d)); }
+  function linkBtn(text, view) { return h('button', { class: 'linkbtn', type: 'button', onclick: function () { go(view); }, text: text }); }
+  function todoGroup(title, items) {
+    items = items || [];
+    return h('div', { class: 'todo-group' }, h('h3', null, title, h('span', { class: 'count', text: items.length })),
+      items.length ? h('ul', { class: 'plain' }, items.map(function (x) { return h('li', { text: x }); })) : h('p', { class: 'empty', text: 'Nothing' }));
+  }
+  function doneList(items) {
+    return h('ul', { class: 'plain small done-list' }, items.map(function (e) {
+      return h('li', null, e.time ? h('span', { class: 'muted tnum', text: e.time + ' ' }) : null,
+        e.kind === 'started' ? [chip('started', 'accent'), ' '] : e.kind === 'failed' ? [chip('failed', 'critical', '✕'), ' '] : null, e.text);
+    }));
+  }
+  function collapsible(items, fn, n) {
+    var box = h('div', { style: 'display:grid;gap:4px;min-width:0' }, h('ul', { class: 'timeline' }, items.slice(0, n).map(fn)));
+    if (items.length > n) box.appendChild(h('details', { class: 'table' }, h('summary', { text: 'Show ' + (items.length - n) + ' more' }), h('ul', { class: 'timeline' }, items.slice(n).map(fn))));
+    return box;
+  }
+
+  // ---------------------------------------------------------------- today: "what's happening, does anything need me?"
+  function renderToday(v) {
+    var t = D.tokens, a = D.activity || {};
+    var td = t.today || { tokens: {}, cost_usd: 0, messages: 0, runs: 0, subagent_runs: 0, turns: {}, telegram_replies: 0, tool_calls: 0 };
+    var cp = t.cost_pace || {};
+    var pace = null;
+    if (cp.avg_usd) {
+      var pp = Math.min(100, cp.today_pct_of_avg || 0), dp = Math.min(100, cp.day_elapsed_pct || 0);
+      pace = h('div', { class: 'pace' },
+        h('div', { class: 'meter', role: 'img', 'aria-label': 'Today ' + Math.round(cp.today_pct_of_avg || 0) + '% of the daily average, ' + Math.round(dp) + '% of the day gone' },
+          h('div', { class: 'fill', style: 'width:' + Math.max(0.5, pp) + '%' }), h('div', { class: 'mark', style: 'left:' + dp + '%' })),
+        h('p', { class: 'note', text: Math.round(cp.today_pct_of_avg || 0) + '% of the daily average (' + fmtUSD(cp.avg_usd) + ', ' + plural(cp.days, 'day') +
+          ' before today), with ' + Math.round(dp) + '% of the day gone (tick).' }));
+    }
+    var hero = panel(null);
+    hero.appendChild(h('div', { class: 'hero' },
+      h('span', { class: 'eyebrow', text: 'Tokens today' }),
+      h('div', { class: 'value' }, fmtN(sum(td.tokens))),
+      h('p', { class: 'ink2', text: '≈ ' + fmtUSD(td.cost_usd) + ' at API list prices · ' + fmtInt(td.messages) + ' model calls since midnight' }), pace));
+    v.appendChild(hero);
+
+    var turns = td.turns || {}, sub = td.subagent_runs || 0, runs = td.runs || 0;
+    v.appendChild(tileRow([
+      tile('Agent runs today', fmtInt(runs), plural(sub, 'subagent') + ' · ' + plural(Math.max(0, runs - sub), 'headless worker')),
+      tile('Your messages today', fmtInt((turns.telegram || 0) + (turns['you (app/terminal)'] || 0)),
+        'Telegram + app · ' + plural(td.telegram_replies || 0, 'reply', 'replies') + ' from me'),
+      tile('Tool calls today', fmtInt(td.tool_calls || 0), 'since midnight · the busiest tools are on Usage')
+    ], 'three'));
+
+    var g = h('div', { class: 'grid2' });
+    g.appendChild(healthPanel());
+    g.appendChild(rightNowPanel(a));
+    v.appendChild(g);
+    var g2 = h('div', { class: 'grid2' });
+    g2.appendChild(goalsPanel());
+    g2.appendChild(workLogPanel(a));
+    v.appendChild(g2);
+
+    // context snapshot (~/bin/context): the HN picks only, folded
+    var cx = D.context;
+    if (cx && (cx.hn || []).length) {
+      var cxp = panel('Context', h('span', { class: 'note tnum', text: 'snapshot ' + (cx.generated_local || '?').slice(5) + (cx.age_min > 24 * 60 ? ' · stale' : '') }));
+      cxp.appendChild(details('Hacker News picks (' + Math.min(8, cx.hn.length) + ')', h('ul', { class: 'plain small hn' }, cx.hn.slice(0, 8).map(function (x) {
+        return h('li', null, h('a', { href: 'https://news.ycombinator.com/item?id=' + x.id, target: '_blank', rel: 'noopener noreferrer', text: x.title }),
+          ' ', h('span', { class: 'muted tnum', text: x.points + ' pts · ' + x.domain }),
+          (x.tags || []).map(function (tg) { return [' ', chip(tg, 'accent')]; }));
+      }))));
+      v.appendChild(cxp);
+    }
+  }
+  var ST_RANK = { critical: 0, warn: 1, unknown: 2, ok: 3 };
+  function checkList(list) {
+    return h('ul', { class: 'checks' }, list.map(function (c) {
+      return h('li', null, h('span', { class: 'name', text: c.name }), statusChip(c.status),
+        h('span', { class: 'val', text: c.value }), c.detail ? h('span', { class: 'det', text: c.detail }) : null);
+    }));
+  }
+  // one Health card: container checks + the Unraid server (health report, array capacity) + the vault; problems first
+  function healthPanel() {
+    var HL = D.health || {}, checks = HL.checks || [], sm = HL.summary || {};
+    var p = panel('Health');
+    p.appendChild(h('div', { class: 'legend' }, ['critical', 'warn', 'unknown', 'ok'].filter(function (k) { return sm[k]; }).map(function (k) {
+      return h('span', null, statusChip(k), h('span', { class: 'tnum', text: '× ' + sm[k] }));
+    })));
+    var bad = checks.filter(function (c) { return c.status !== 'ok'; }).sort(function (x, y) { return (ST_RANK[x.status] || 0) - (ST_RANK[y.status] || 0); });
+    var good = checks.filter(function (c) { return c.status === 'ok'; });
+    if (bad.length) p.appendChild(checkList(bad));
+    else p.appendChild(h('p', { class: 'small ink2', text: 'All ' + checks.length + ' checks pass.' }));
+    if (good.length && bad.length) p.appendChild(details(plural(good.length, 'passing check'), checkList(good)));
+    else if (good.length) p.appendChild(details('Show them', checkList(good)));
+    p.appendChild(h('p', { class: 'note', text: 'Container, Unraid server (health report, array capacity) and privacy vault, at ' + D.generated_local + '.' }));
+    return p;
+  }
+  function rightNowPanel(a) {
+    var p = panel('Right now');
+    var running = (a.agents || []).filter(function (x) { return x.state === 'running' || x.state === 'stalled'; });
+    p.appendChild(h('div', { class: 'todo-group' }, h('h3', null, 'Background agents', h('span', { class: 'count', text: running.length })),
+      running.length ? h('ul', { class: 'plain' }, running.map(function (x) {
+        return h('li', null, x.description + ' ', h('span', { class: 'muted small', text: '(' + x.run + ')' }), x.state === 'stalled' ? [' ', chip('stalled', 'warn', '▲')] : null);
+      })) : h('p', { class: 'empty', text: 'None running' })));
+    var td = a.todo || {};
+    if ((td.due || []).length) p.appendChild(todoGroup('Due', td.due));
+    p.appendChild(todoGroup('In progress', td.in_progress));
+    p.appendChild(todoGroup('Waiting on you', td.waiting));
+    p.appendChild(h('p', { class: 'note', text: plural(td.ideas_count || 0, 'idea') + ' queued for idle time.' }));
+    return p;
+  }
+  function goalsPanel() {
+    var GL = D.goals || { goals: [] };
+    var gp = panel('Goals', h('span', { class: 'note tnum', text: (GL.done || 0) + ' of ' + (GL.total || 0) + ' steps done' }));
+    if ((GL.goals || []).length) {
+      gp.appendChild(h('ul', { class: 'plain goals' }, GL.goals.map(function (x) {
+        var p = x.total ? Math.round(100 * x.done / x.total) : 0;
+        return h('li', { class: 'goal' },
+          h('div', { class: 'pace-top' }, h('span', { class: 'goal-title', text: x.n + '. ' + x.title }),
+            h('span', { class: 'muted small tnum', text: x.done + '/' + x.total })),
+          h('div', { class: 'meter', role: 'img', 'aria-label': x.done + ' of ' + x.total + ' steps done' },
+            p ? h('div', { class: 'fill', style: 'width:' + p + '%' }) : null),
+          x.next ? h('span', { class: 'small ink2' }, x.next_blocked ? [chip('blocked', 'warn', '▲'), ' '] : null, 'Next: ' + x.next)
+                 : h('span', { class: 'small muted', text: x.open ? 'All open steps are blocked' : 'All steps done' }));
+      })));
+    } else gp.appendChild(h('p', { class: 'empty', text: 'No GOALS.md yet' }));
+    return gp;
+  }
+  // Work log (PROACTIVE.md): today's lines or last night's (22:00–08:00, named by the morning). Mornings open on the night.
+  function workLogPanel(a) {
+    var dl = a.dayline, LN = a.lastnight, hasNight = !!(LN && LN.tonight);
+    if (!MODES.worklog) MODES.worklog = hasNight && LN.tonight.count && +(D.generated_local || '').slice(11, 13) < 12 ? 'night' : 'today';
+    var body = h('div', { class: 'worklog' });
+    var p = panel('Work log', hasNight ? segToggle('worklog', 'Which part of the log', [['today', 'Today'], ['night', 'Last night']], draw) : null);
+    p.appendChild(body);
+    function draw() {
+      body.textContent = '';
+      body.appendChild(MODES.worklog === 'night' && hasNight ? nightLog(LN) : todayLog(dl));
+    }
+    draw();
+    return p;
+  }
+  function todayLog(dl) {
+    var box = h('div', { class: 'logpart' });
+    var done = dl ? dl.done || [] : [];
+    box.appendChild(h('p', { class: 'note tnum', text: (dl && !dl.today ? dayLabel(dl.date) : 'Today I did') + ' · ' + nItems(done.length) }));
+    box.appendChild(done.length ? doneList(done) : h('p', { class: 'empty', text: 'Nothing logged yet today' }));
+    if (dl && dl.changes) box.appendChild(h('p', { class: 'small ink2' }, plural(dl.changes, 'setup change') + (dl.today ? ' today' : '') + ' ', linkBtn('Changes', 'codebase')));
+    return box;
+  }
+  function nightLog(LN) {
+    var t = LN.tonight, box = h('div', { class: 'logpart' });
+    box.appendChild(h('p', { class: 'note tnum', text: 'Last night · ' + (t.in_progress ? 'tonight so far' : 'night to ' + dayLabel(t.date)) + ' · ' + nItems(t.count) }));
+    box.appendChild(t.count ? doneList(t.items) : h('p', { class: 'empty', text: 'Nothing logged between 22:00 and 08:00' }));
+    var ea = LN.earlier || [];
+    if (ea.length) {
+      var nb = h('div', { class: 'nights' }, h('p', { class: 'small muted', text: 'Each night runs ' + (LN.window || '22:00–08:00') +
+        ' and is named by its morning.' + (LN.untimed ? ' ' + plural(LN.untimed, 'log line') + ' without a time left out.' : '') }));
+      ea.forEach(function (n) {
+        nb.appendChild(n.count ? h('details', { class: 'table night' }, h('summary', { class: 'tnum', text: dayLabel(n.date) + ' · ' + nItems(n.count) }), doneList(n.items))
+          : h('p', { class: 'small muted tnum', text: dayLabel(n.date) + ' · nothing logged' }));
+      });
+      box.appendChild(details('Last ' + ea.length + ' nights', nb));
+    }
+    return box;
+  }
+
+  // ---------------------------------------------------------------- usage: tokens and cost
+  function renderUsage(v) {
+    var t = D.tokens, tot = t.totals, days = t.daily || [];
+    v.appendChild(tileRow([
+      tile('Last 24 hours', fmtN(t.last_24h.tokens), '≈ ' + fmtUSD(t.last_24h.cost_usd)),
+      tile('Last 7 days', fmtN(t.last_7d.tokens), '≈ ' + fmtUSD(t.last_7d.cost_usd)),
+      tile('Since ' + shortDay((t.first || '').slice(0, 10)), fmtN(tot.tokens), '≈ ' + fmtUSD(tot.cost_usd) + ' · ' + plural(t.runs_total, 'agent run'))
+    ], 'three'));
+
+    // tokens: 48 hours or by day
+    var leg = h('div'), host = h('div', { class: 'chart' }), tbl = h('div');
+    var p1 = panel('Token usage', segToggle('usage', 'Time range', [['hourly', '48 hours'], ['daily', 'By day']], drawTokens));
+    p1.appendChild(leg); p1.appendChild(host); p1.appendChild(tbl);
+    p1.appendChild(h('p', { class: 'note', text: 'Counted from transcripts since ' + (t.first || '').replace('T', ' ').slice(0, 16) +
+      '. Most tokens are cache reads: the same context re-read on every call, billed at a fraction of the input price.' }));
+    function drawTokens() {
+      leg.textContent = ''; tbl.textContent = '';
+      var hourly = MODES.usage === 'hourly';
+      leg.appendChild(legend(KINDS, hourly ? h('span', null, h('i', { class: 'sw shade' }), 'Quiet hours 00–08') : null));
+      var rows = (hourly ? t.hourly : days).map(function (r) { return { values: r.tokens, r: r }; });
+      columnChart(host, {
+        rows: rows, series: KINDS, height: 210,
+        aria: hourly ? 'Tokens per hour over the last 48 hours, by main session, subagents and headless workers' : 'Tokens per day',
+        yFmt: fmtN, yFmtFull: function (x) { return fmtN(x) + ' tokens'; },
+        shade: hourly ? function (i) { return +rows[i].r.label.slice(0, 2) < 8; } : null,
+        xTick: hourly
+          ? function (i) { var l = rows[i].r.label, hh = +l.slice(0, 2); return hh === 0 ? rows[i].r.day : (hh % 6 === 0 ? l.slice(0, 2) : null); }
+          : dayTicks(days.map(function (r) { return r.date; }), 8),
+        tipTitle: function (i) { var r = rows[i].r; return hourly ? r.day + ' ' + r.label + '–' + String((+r.label.slice(0, 2) + 1) % 24).padStart(2, '0') + ':00' : dayLabel(r.date); },
+        tipExtra: function (i) { var c = rows[i].r.cost_usd; return c ? '≈ ' + fmtUSD(c) + ' list price' : null; }
+      });
+      tbl.appendChild(chartTable([{ label: hourly ? 'Hour' : 'Day' }].concat(KINDS.map(function (k) { return { label: k.label, n: 1 }; })).concat([{ label: 'Est. $', n: 1 }]),
+        rows.map(function (x) { var r = x.r; return [hourly ? r.day + ' ' + r.label : r.date].concat(KINDS.map(function (k) { return fmtInt(r.tokens[k.key] || 0); })).concat([fmtUSD(r.cost_usd)]); })));
+    }
+    onChart('usage', drawTokens);
+    v.appendChild(p1);
+
+    // cost per day, last 14 days: by source or by token type, with the daily average as a dashed line
+    var cp = t.cost_pace || {}, d14 = days.slice(-14);
+    var legC = h('div'), hostC = h('div', { class: 'chart' }), tblC = h('div');
+    var pc = panel('Cost per day', segToggle('cost', 'Split', [['source', 'By source'], ['type', 'By type']], drawCost));
+    pc.appendChild(h('p', { class: 'note', text: 'Last 14 days · USD at API list prices' + (cp.avg_usd ? '' : ' · no earlier days yet for an average') }));
+    pc.appendChild(legC); pc.appendChild(hostC); pc.appendChild(tblC);
+    function drawCost() {
+      legC.textContent = ''; tblC.textContent = '';
+      var bySrc = MODES.cost === 'source', series = bySrc ? KINDS : COSTS;
+      var rows = d14.map(function (r) { return { values: (bySrc ? r.cost_by_kind : r.cost) || {}, r: r }; });
+      legC.appendChild(legend(series, cp.avg_usd ? h('span', null, h('i', { class: 'sw dash' }), 'Daily average') : null));
+      columnChart(hostC, {
+        rows: rows, series: series, height: 190,
+        aria: 'Estimated cost per day over the last 14 days, ' + (bySrc ? 'by main session, subagents and headless workers' : 'by token type') + ', with the daily average',
+        yFmt: function (x) { return '$' + fmtN(x); }, yFmtFull: fmtUSD,
+        refLine: cp.avg_usd ? { value: cp.avg_usd, label: 'avg ' + fmtUSD(cp.avg_usd) } : null,
+        xTick: dayTicks(d14.map(function (r) { return r.date; }), 7),
+        tipTitle: function (i) { return dayLabel(d14[i].date) + (i === d14.length - 1 && d14[i].date === (t.today || {}).date ? ' (so far)' : ''); }
+      });
+      tblC.appendChild(chartTable([{ label: 'Day' }].concat(series.map(function (k) { return { label: k.label, n: 1 }; })).concat([{ label: 'Total', n: 1 }]),
+        rows.map(function (x) { return [x.r.date].concat(series.map(function (k) { return fmtUSD(x.values[k.key] || 0); })).concat([fmtUSD(x.r.cost_usd)]); })));
+    }
+    onChart('usage', drawCost);
+    v.appendChild(pc);
+
+    // where the tokens go: by type, by source, by model (one panel)
+    var p3 = panel('Where the tokens go', h('span', { class: 'note', text: 'since ' + shortDay((t.first || '').slice(0, 10)) }));
+    var types = [['cache_read', 'Cache read'], ['cache_write', 'Cache write'], ['output', 'Output (incl. thinking)'], ['input', 'Input (uncached)']];
+    p3.appendChild(h('h3', { text: 'By token type' }));
+    p3.appendChild(tableOf([{ label: 'Type' }, { label: 'Tokens', n: 1 }, { label: '% tokens', n: 1 }, { label: 'Est. $', n: 1 }, { label: '% cost', n: 1 }],
+      types.map(function (x) { return [x[1], fmtN(tot[x[0]]), pct(tot[x[0]], tot.tokens) + '%', fmtUSD(tot.cost[x[0]]), pct(tot.cost[x[0]], tot.cost_usd) + '%']; })));
+    p3.appendChild(h('h3', { text: 'By source' }));
+    p3.appendChild(tableOf([{ label: 'Where' }, { label: 'Calls', n: 1 }, { label: 'Tokens', n: 1 }, { label: 'Output', n: 1 }, { label: 'Est. $', n: 1 }],
+      KINDS.filter(function (k) { return t.by_kind[k.key]; }).map(function (k) { var b = t.by_kind[k.key]; return [k.label, fmtInt(b.messages), fmtN(b.tokens), fmtN(b.output), fmtUSD(b.cost_usd)]; })));
+    p3.appendChild(h('h3', { text: 'By model' }));
+    p3.appendChild(tableOf([{ label: 'Model' }, { label: 'Calls', n: 1 }, { label: 'Tokens', n: 1 }, { label: 'Est. $', n: 1 }],
+      t.by_model.map(function (m) { return [m.model, fmtInt(m.messages), fmtN(m.tokens), fmtUSD(m.cost_usd)]; })));
+    var p5 = panel('Most used tools', h('span', { class: 'note', text: fmtInt(t.tool_calls_total) + ' calls in total' }));
+    p5.appendChild(rankBars(t.tools_top.slice(0, 12), { value: function (x) { return x.calls; }, name: function (x) { return x.name; }, label: function (x) { return fmtInt(x.calls) + ' calls'; } }));
+    var g2 = h('div', { class: 'grid2' });
+    g2.appendChild(p3); g2.appendChild(p5);
+    v.appendChild(g2);
+
+    // agent runs: biggest or latest
+    function runMeta(x) {
+      return [x.kind === 'subagent' ? x.agent_type : 'headless', x.effort ? 'effort ' + x.effort : null, x.start, x.minutes + ' min', fmtN(x.output) + ' output', x.models.map(function (m) { return m.replace('claude-', ''); }).join(', ')]
+        .filter(Boolean).map(function (m) { return h('span', { text: m }); });
+    }
+    var runsBox = h('div');
+    var p6 = panel('Agent runs', segToggle('runs', 'Which runs', [['top', 'Biggest'], ['recent', 'Latest']], drawRuns));
+    p6.appendChild(runsBox);
+    function drawRuns() {
+      runsBox.textContent = '';
+      var top = MODES.runs === 'top';
+      runsBox.appendChild(h('p', { class: 'note', text: top ? 'The 10 biggest by tokens' : 'The 10 most recent' }));
+      runsBox.appendChild(rankBars((top ? t.top_runs : t.recent_runs).slice(0, 10), { value: function (x) { return x.tokens; }, name: function (x) { return x.description; },
+        label: function (x) { return fmtN(x.tokens) + ' · ' + fmtUSD(x.cost_usd); }, meta: runMeta }));
+    }
+    drawRuns();
+    v.appendChild(p6);
+
+    var p8 = panel('How the estimate works');
+    var pr = t.pricing_usd_per_mtok || {};
+    p8.appendChild(details('Prices and what is missing', h('div', { class: 'est' },
+      h('p', { class: 'small ink2', text: t.note }),
+      tableOf([{ label: 'Model' }, { label: 'Input', n: 1 }, { label: 'Output', n: 1 }, { label: 'Cache read', n: 1 }, { label: 'Write 5 min', n: 1 }, { label: 'Write 1 h', n: 1 }],
+        Object.keys(pr).map(function (m) { var x = pr[m]; return [m, '$' + x.input, '$' + x.output, '$' + x.cache_read, '$' + x.cache_write_5m, '$' + x.cache_write_1h]; })),
+      h('p', { class: 'note', text: 'Prices per million tokens. ' + t.claude_code_counter_note + ' It reads ' + fmtUSD(t.claude_code_counter_usd) +
+        '. Claude Code\'s own helper calls (web page summaries, titles) are not in the transcripts, so they are missing above. Claude Code ' + (t.claude_code_version || '?') + ', ' + t.transcript_files + ' transcript files.' }))));
+    v.appendChild(p8);
+  }
+
+  // ---------------------------------------------------------------- activity: what did I do, why did I wake up
+  function renderActivity(v) {
+    var a = D.activity;
+    var tl = a.timeline;
+    if (tl) {
+      var pt = panel('Last 24 hours', h('span', { class: 'note', text: hhmm(tl.from) + ' yesterday – ' + hhmm(tl.to) + ' now' }));
+      pt.appendChild(legend([KINDS[1], KINDS[2]], [h('span', null, h('i', { class: 'sw dot' }), 'Your messages'), h('span', null, h('i', { class: 'sw shade' }), 'Quiet hours 00–08')]));
+      if ((tl.runs || []).length || (tl.owner_messages || []).length) {
+        var hostT = h('div', { class: 'chart' });
+        pt.appendChild(hostT);
+        onChart('activity', function () { timelineChart(hostT, tl); });
+        pt.appendChild(chartTable([{ label: 'Start' }, { label: 'End' }, { label: 'Run' }, { label: 'Min', n: 1 }, { label: 'Est. $', n: 1 }],
+          tl.runs.map(function (r) { return [hhmm(r.start), hhmm(r.end), r.description, String(Math.round(r.minutes)), fmtUSD(r.cost_usd)]; })));
+      } else pt.appendChild(h('p', { class: 'empty', text: 'Nothing ran in the last 24 hours.' }));
+      pt.appendChild(h('p', { class: 'note', text: tl.runs.length + ' agent and worker runs, ' + tl.owner_messages.length + ' messages from you in this window. Tap a row for details.' +
+        (tl.runs_dropped ? ' ' + tl.runs_dropped + ' older runs not shown.' : '') + ' Message times only, never their text.' }));
+      v.appendChild(pt);
+    }
+    var g = h('div', { class: 'grid2' });
+    var p2 = panel('Background agents', h('span', { class: 'note', text: 'last 2 hours' }));
+    if (a.agents.length) {
+      p2.appendChild(tableOf([{ label: 'Task' }, { label: 'State' }, { label: 'Ran', n: 1 }, { label: 'Quiet', n: 1 }],
+        a.agents.map(function (x) { return [x.description, x.state, x.run, x.silent]; })));
+    } else p2.appendChild(h('p', { class: 'empty', text: 'No subagents in the last 2 hours.' }));
+    g.appendChild(p2);
+    var days = D.tokens.daily;
+    var td = days[days.length - 1] || { turns: {} }, yd = days[days.length - 2] || { turns: {} };
+    var wk7 = days.slice(-7);
+    var kinds = [['telegram', 'Telegram messages'], ['you (app/terminal)', 'App or terminal'], ['heartbeat', 'Heartbeats'], ['scheduled', 'Scheduled check-ins'], ['agent', 'Agent reports']];
+    function tot7(fn) { return wk7.reduce(function (s0, d) { return s0 + (fn(d) || 0); }, 0); }
+    var p3 = panel('What woke me up');
+    p3.appendChild(tableOf([{ label: 'Trigger' }, { label: 'Today', n: 1 }, { label: 'Yesterday', n: 1 }, { label: '7 days', n: 1 }],
+      kinds.map(function (k) { return [k[1], String(td.turns[k[0]] || 0), String(yd.turns[k[0]] || 0), String(tot7(function (d) { return d.turns[k[0]]; }))]; })
+        .concat([['My Telegram replies', String(td.telegram_replies || 0), String(yd.telegram_replies || 0), String(tot7(function (d) { return d.telegram_replies; }))]])));
+    var hb = a.heartbeat;
+    p3.appendChild(h('p', { class: 'note', text: 'Heartbeats come every 10 idle minutes' + (hb ? '; ' + plural(hb.skip_today, 'more was', 'more were') + ' skipped today by the free pre-check' : '') +
+      '. Replies = Telegram messages I sent you.' }));
+    g.appendChild(p3);
+    v.appendChild(g);
+
+    var g2 = h('div', { class: 'grid2' });
+    var G = D.growth || {}, act = G.activity || [];
+    if (act.length) {
+      var AS = [{ key: 'heartbeats', label: 'Heartbeats', color: 'var(--s1)' },
+                { key: 'owner_msgs', label: 'Your messages', color: 'var(--s2)' },
+                { key: 'subagents', label: 'Subagents launched', color: 'var(--s3)' }];
+      var today = (D.generated_at || '').slice(0, 10);
+      var p4 = panel('Activity per day', h('span', { class: 'note', text: 'since ' + shortDay(act[0].date) }));
+      p4.appendChild(legend(AS));
+      var hostA = h('div', { class: 'chart' });
+      p4.appendChild(hostA);
+      var rowsA = act.map(function (r) { return { values: r }; });
+      onChart('activity', function () {
+        lineChart(hostA, { rows: rowsA, series: AS, endLabels: true, height: 200, yFmt: fmtN, yFmtFull: function (x) { return fmtInt(x); },
+          xLabel: function (i) { return shortDay(act[i].date); }, tipTitle: function (i) { return dayLabel(act[i].date) + (act[i].date === today ? ' · so far' : ''); },
+          aria: 'Heartbeats, your messages and subagents launched per day' });
+      });
+      p4.appendChild(chartTable([{ label: 'Day' }].concat(AS.map(function (x) { return { label: x.label, n: 1 }; })),
+        act.slice().reverse().map(function (r) { return [r.date + (r.date === today ? ' (so far)' : '')].concat(AS.map(function (x) { return fmtInt(r[x.key]); })); })));
+      p4.appendChild(h('p', { class: 'note', text: 'Same counts as the table: heartbeats = scheduler wake-ups; your messages = Telegram + app; subagents = background runs I launched.' }));
+      g2.appendChild(p4);
+    }
+    var r = a.reminders;
+    var p6 = panel('Reminders');
+    if (r) {
+      p6.appendChild(h('dl', { class: 'kv' },
+        h('dt', { text: 'Pending' }), h('dd', { text: r.total + ' (' + r.for_owner + ' for you, ' + r.for_me + ' for me)' }),
+        h('dt', { text: 'Next 7 days' }), h('dd', { text: String(r.next_7d) }),
+        h('dt', { text: 'Next one' }), h('dd', { text: r.next_at || '–' }),
+        h('dt', { text: 'Kinds' }), h('dd', { text: Object.keys(r.by_tag).map(function (k) { return k + ' ' + r.by_tag[k]; }).join(', ') })));
+      p6.appendChild(h('p', { class: 'note', text: 'Counts only; reminder texts stay private.' }));
+    } else p6.appendChild(h('p', { class: 'empty', text: 'No reminder data.' }));
+    g2.appendChild(p6);
+    v.appendChild(g2);
+  }
+
+  // ---------------------------------------------------------------- codebase: what the assistant is made of, how it grows
+  function renderCodebase(v) {
+    var C = D.codebase || {}, st = C.stats || {}, br = C.brain || {}, G = D.growth || {}, days = G.days || [];
+    var cron = (D.activity || {}).cron || [], on = cron.filter(function (c) { return c.enabled; }), off = cron.filter(function (c) { return !c.enabled; });
+    var first = days[0] || {}, last = days[days.length - 1] || {}, fc = first.counts || {}, lc = last.counts || {};
+    var since = days.length ? shortDay(first.date) : '?', span = Math.max(1, days.length - 1);
+    function delta(k, f) { return sign((lc[k] || 0) - (fc[k] || 0), f || String); }
+    var kbs = days.filter(function (d) { return d.claude_md_kb != null; });
+    var peak = kbs.reduce(function (m, d) { return !m || d.claude_md_kb > m.claude_md_kb ? d : m; }, null);
+    var ts = st.tests || {}, hk = st.hooks || {}, pl = st.plugins || {};
+    v.appendChild(tileRow([
+      tile('Lines of code + prompts', days.length ? fmtN(last.loc_total) : '–', days.length ? sign(last.loc_total - first.loc_total) + ' since ' + since + ' · ≈ ' + fmtN((last.loc_total - first.loc_total) / span) + '/day' : null),
+      tile('Scripts', String(lc.scripts || 0), delta('scripts') + ' since ' + since),
+      tile('Skills · subagents', (lc.skills || 0) + ' · ' + (lc.agents || 0), delta('skills') + ' skills, ' + delta('agents') + ' subagents'),
+      tile('Scheduled jobs', on.length + ' on · ' + off.length + ' off', plural(lc.cron || 0, 'crontab line') + ' · ' + delta('cron') + ' since ' + since),
+      tile('Tests', fmtInt(ts.suites || 0) + ' suites', '≈ ' + fmtN(ts.checks || 0) + ' assertion lines'),
+      tile('Plugins · hooks', (pl.count || 0) + ' · ' + (hk.handlers || 0), (pl.names || []).join(', ') + ' · hooks on ' + (hk.events || 0) + ' events'),
+      tile('Config snapshots', fmtInt(br.commits || 0), (br.manual || 0) + ' around changes, the rest automatic'),
+      tile('CLAUDE.md', last.claude_md_kb == null ? '–' : last.claude_md_kb + ' KB', peak ? 'peak ' + peak.claude_md_kb + ' KB on ' + shortDay(peak.date) : null)
+    ], 'four'));
+
+    var SC = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
+    var parts = (G.parts || []).slice(0, 8).map(function (p, i) { return { key: p.key, label: p.label, color: SC[i] }; });
+    function dayTitle(d, live) { return dayLabel(d) + (live ? ' · so far' : ''); }
+    function xl(list) { return function (i) { return shortDay(list[i].date); }; }
+    if (days.length) {
+      // lines: stacked by part, or split into small multiples with their own scale
+      var body = h('div', { class: 'gbody' });
+      var p1 = panel('Lines over time', segToggle('growth', 'View', [['stacked', 'Stacked'], ['split', 'Split']], drawLines));
+      p1.appendChild(body);
+      var rowsL = days.map(function (d) { return { values: d.loc || {} }; });
+      var drawers = [];
+      function drawLines() {
+        body.textContent = '';
+        drawers = [];
+        if (MODES.growth === 'stacked') {
+          body.appendChild(legend(parts));
+          var host = h('div', { class: 'chart' });
+          body.appendChild(host);
+          drawers.push(function () {
+            lineChart(host, { rows: rowsL, series: parts, stacked: true, height: 220, yFmt: fmtN, yFmtFull: function (x) { return fmtInt(x); },
+              xLabel: xl(days), tipTitle: function (i) { return dayTitle(days[i].date, days[i].live); },
+              aria: 'Lines of my code and prompts per day, stacked by part' });
+          });
+        } else {
+          var grid = h('div', { class: 'multiples' });
+          parts.forEach(function (p) {
+            var a0 = (first.loc || {})[p.key] || 0, b0 = (last.loc || {})[p.key] || 0;
+            var host = h('div', { class: 'chart' });
+            grid.appendChild(h('div', { class: 'mult' },
+              h('div', { class: 'mult-head' }, h('span', { class: 'mult-name' }, h('i', { class: 'sw', style: 'background:' + p.color }), p.label)),
+              h('div', { class: 'mult-val tnum' }, h('b', { text: fmtN(b0) }), ' ', h('span', { text: sign(b0 - a0) })), host));
+            drawers.push(function () {
+              lineChart(host, { rows: rowsL, series: [p], mini: true, area: true, yFmt: fmtN, yFmtFull: function (x) { return fmtInt(x) + ' lines'; },
+                xLabel: xl(days), tipTitle: function (i) { return dayTitle(days[i].date, days[i].live); }, aria: p.label + ': lines per day' });
+            });
+          });
+          body.appendChild(grid);
+        }
+        body.appendChild(chartTable([{ label: 'Day' }].concat(parts.map(function (p) { return { label: p.label, n: 1 }; })).concat([{ label: 'Total', n: 1 }]),
+          days.slice().reverse().map(function (d) { return [d.date + (d.live ? ' (so far)' : '')].concat(parts.map(function (p) { return fmtInt((d.loc || {})[p.key] || 0); })).concat([fmtInt(d.loc_total)]); })));
+        body.appendChild(h('p', { class: 'note', text: 'The one line count on this page: non-blank lines of my own code and prompts (skills, subagents, workspace notes). ' +
+          'Past days: the last git snapshot of the day (brain + vault repos); today: live, updated hourly ' + String(G.updated || '?').slice(11) + '. Plugins and firefly-sync have no git history, so they are left out everywhere.' }));
+        drawers.forEach(function (fn) { fn(); });
+      }
+      onChart('codebase', drawLines);
+      v.appendChild(p1);
+
+      // counts (each its own scale; today's values are the tiles above) + CLAUDE.md size
+      var g = h('div', { class: 'grid2' });
+      var p2 = panel('Counts over time', h('span', { class: 'note', text: 'since ' + since }));
+      var grid2 = h('div', { class: 'multiples two' });
+      var CN = [['scripts', 'Scripts'], ['skills', 'Skills'], ['agents', 'Subagent types'], ['cron', 'Crontab lines']];
+      var rowsC = days.map(function (d) { return { values: d.counts || {} }; });
+      CN.forEach(function (c) {
+        var host = h('div', { class: 'chart' });
+        grid2.appendChild(h('div', { class: 'mult' }, h('div', { class: 'mult-head' }, h('span', { class: 'mult-name', text: c[1] })), host));
+        onChart('codebase', function () {
+          lineChart(host, { rows: rowsC, series: [{ key: c[0], label: c[1], color: 'var(--s1)' }], mini: true, yFmt: function (x) { return String(Math.round(x)); },
+            yFmtFull: function (x) { return String(x) + ' ' + c[1].toLowerCase(); }, xLabel: xl(days), tipTitle: function (i) { return dayTitle(days[i].date, days[i].live); },
+            aria: c[1] + ' per day' });
+        });
+      });
+      p2.appendChild(grid2);
+      p2.appendChild(chartTable([{ label: 'Day' }].concat(CN.map(function (c) { return { label: c[1], n: 1 }; })),
+        days.slice().reverse().map(function (d) { return [d.date].concat(CN.map(function (c) { return String((d.counts || {})[c[0]] || 0); })); })));
+      g.appendChild(p2);
+      var p3 = panel('CLAUDE.md size', h('span', { class: 'note', text: 'KB · my operating manual' }));
+      var hostK = h('div', { class: 'chart' });
+      p3.appendChild(hostK);
+      var rowsK = kbs.map(function (d) { return { values: { kb: d.claude_md_kb } }; });
+      onChart('codebase', function () {
+        lineChart(hostK, { rows: rowsK, series: [{ key: 'kb', label: 'CLAUDE.md', color: 'var(--s1)' }], area: true, height: 180,
+          yFmt: function (x) { return (x % 1 ? x.toFixed(1) : x) + ' KB'; }, yFmtFull: function (x) { return x + ' KB'; },
+          xLabel: xl(kbs), tipTitle: function (i) { return dayTitle(kbs[i].date, kbs[i].live); }, aria: 'CLAUDE.md size in KB per day' });
+      });
+      p3.appendChild(chartTable([{ label: 'Day' }, { label: 'KB', n: 1 }], kbs.slice().reverse().map(function (d) { return [d.date, String(d.claude_md_kb)]; })));
+      p3.appendChild(h('p', { class: 'note', text: 'Loaded into every turn, so smaller means cheaper and clearer.' }));
+      g.appendChild(p3);
+      v.appendChild(g);
+    } else v.appendChild(h('p', { class: 'empty', text: 'No growth data yet: run dash-growth --backfill on the bot.' }));
+
+    var g3 = h('div', { class: 'grid2' });
+    var pl1 = panel('Code by language', h('span', { class: 'note', text: 'today, same count as the Lines tile' }));
+    if ((G.langs || []).length) {
+      pl1.appendChild(rankBars(G.langs, { name: function (x) { return x.lang; }, value: function (x) { return x.loc; },
+        label: function (x) { return fmtInt(x.loc) + ' lines'; } }));
+    } else pl1.appendChild(h('p', { class: 'empty', text: 'Counted at the next hourly refresh.' }));
+    g3.appendChild(pl1);
+    var skills = C.skills || [], agents = C.agents || [];
+    var ps = panel('Skills and subagents', h('span', { class: 'note', text: plural(skills.length, 'skill') + ' · ' + plural(agents.length, 'subagent') }));
+    ps.appendChild(h('div', { class: 'skills' }, skills.map(function (x) { return h('div', null, h('b', { text: x.name }), ' ', x.what); })));
+    if (agents.length) {
+      ps.appendChild(h('h3', { text: 'Subagents' }));
+      ps.appendChild(h('div', { class: 'skills' }, agents.map(function (x) { return h('div', null, h('b', { text: x.name }), ' ', x.what); })));
+    }
+    var hidden = (lc.skills || 0) + (lc.agents || 0) - skills.length - agents.length;
+    if (hidden > 0) ps.appendChild(h('p', { class: 'note', text: plural(hidden, 'private one') + ' not listed.' }));
+    g3.appendChild(ps);
+    v.appendChild(g3);
+
+    // scheduled jobs: one list from the crontab, grouped by rhythm; disabled ones folded
+    var g4 = h('div', { class: 'grid2' });
+    var pj = panel('Scheduled jobs', h('span', { class: 'note', text: 'from my crontab' }));
+    function li(c) {
+      return h('li', { class: c.enabled ? '' : 'disabled' },
+        h('div', { class: 'row1' }, h('b', { text: c.description || c.job }), h('span', null, c.enabled ? null : [chip('off', ''), ' '], h('span', { text: c.when }))),
+        h('div', { class: 'row2' }, h('span', { class: 'mono', text: c.job }), ' · ', h('span', { class: 'mono', text: c.schedule })));
+    }
+    var left = on.slice();
+    [['Around the clock', /^every (\d+ min|minute)/], ['Daily', /^(daily|hourly|every \d+ h)/], ['Weekly or monthly', /./]].forEach(function (gr) {
+      var items = left.filter(function (c) { return gr[1].test(c.when); });
+      left = left.filter(function (c) { return items.indexOf(c) < 0; });
+      if (!items.length) return;
+      pj.appendChild(h('h3', { text: gr[0] + ' (' + items.length + ')' }));
+      pj.appendChild(h('ul', { class: 'plain cron' }, items.slice(0, 6).map(li)));
+      if (items.length > 6) pj.appendChild(details('Show ' + (items.length - 6) + ' more', h('ul', { class: 'plain cron' }, items.slice(6).map(li))));
+    });
+    if (off.length) pj.appendChild(details(off.length + ' switched off', h('ul', { class: 'plain cron' }, off.map(li))));
+    pj.appendChild(h('p', { class: 'note', text: 'Zurich time. Most jobs stay silent unless something needs you.' }));
+    g4.appendChild(pj);
+    var pc = panel('Changes to my setup', h('span', { class: 'note', text: 'from my changelog' }));
+    pc.appendChild(collapsible((D.activity || {}).changelog || [], function (x) {
+      return h('li', null, h('span', { class: 'when', text: shortDay(x.date) + (x.time ? ' ' + x.time : '') }), h('span', { class: 'what', text: x.text }));
+    }, 10));
+    g4.appendChild(pc);
+    v.appendChild(g4);
+  }
+
+  // ---------------------------------------------------------------- privacy: where does my private data go?
+  function renderPrivacy(v) {
+    var df = D.dataflow || {};
+    if (df.error) { v.appendChild(h('div', { class: 'err', text: df.error })); return; }
+    var p0 = panel('Where your data goes', df.updated ? h('span', { class: 'note', text: 'map checked ' + df.updated }) : null);
+    p0.appendChild(h('p', { class: 'ink2', text: df.summary }));
+    p0.appendChild(h('p', { class: 'small muted' }, 'The live system map is on the ', linkBtn('Architecture', 'architecture'), ' tab.'));
+    v.appendChild(p0);
+    v.appendChild(vaultTiles(df.live));
+    v.appendChild(h('div', { class: 'highlights' }, (df.highlights || []).map(function (x) {
+      var ico = x.level === 'good' ? chip('protected', 'ok', '✓') : x.level === 'high' ? chip('know this', 'serious', '●') : chip('note', 'warn', '◐');
+      return h('div', { class: 'hl ' + x.level }, h('h3', null, ico, x.title), h('p', { text: x.text }));
+    })));
+
+    // flows, filtered by tapping a place
+    var nodes = {}, used = {};
+    (df.nodes || []).forEach(function (n) { nodes[n.id] = n; });
+    (df.flows || []).forEach(function (f) { [f.from, f.to, f.via].forEach(function (id) { if (id) used[id] = 1; }); });
+    if (selectedNode && !used[selectedNode]) selectedNode = null;
+    function label(id) { return nodes[id] ? nodes[id].label + (id === 'tgarchive' ? ' archive' : '') : id; }
+    var p2 = panel('Flows', h('span', { class: 'note', text: 'tap a place to filter' }));
+    var nodeBtns = (df.nodes || []).filter(function (n) { return used[n.id]; }).map(function (n) {
+      var b = h('button', { type: 'button', class: 'g-' + n.group, title: n.sub || null, 'aria-pressed': 'false',
+        onclick: function () { selectedNode = selectedNode === n.id ? null : n.id; applyFilter(); } }, h('i', { class: 'gsw', 'aria-hidden': 'true' }), label(n.id));
+      b.__id = n.id;
+      return b;
+    });
+    p2.appendChild(h('div', { class: 'nodechips', role: 'group', 'aria-label': 'Filter flows by place' }, nodeBtns));
+    var fbar = h('div', { class: 'filterbar' }), flist = h('div', { class: 'fgroups' });
+    p2.appendChild(fbar); p2.appendChild(flist);
+    var FILT = { raw: ['raw', ''], anonymized: ['filtered', 'ok'], metadata: ['status only', ''] };
+    var FGROUPS = [
+      ['Sent to Anthropic', function (f) { return !!f.highlight; }],
+      ['Filtered by the vault', function (f) { return !f.highlight && f.filter === 'anonymized'; }],
+      ['Raw content', function (f) { return !f.highlight && f.filter === 'raw'; }],
+      ['Status or requests only', function (f) { return !f.highlight && f.filter === 'metadata'; }]];
+    function applyFilter() {
+      nodeBtns.forEach(function (b) { b.setAttribute('aria-pressed', String(b.__id === selectedNode)); });
+      fbar.textContent = '';
+      flist.textContent = '';
+      var fl = (df.flows || []).filter(function (f) { return !selectedNode || f.from === selectedNode || f.to === selectedNode || f.via === selectedNode; });
+      fbar.appendChild(h('span', { text: selectedNode ? fl.length + (fl.length === 1 ? ' flow' : ' flows') + ' touching ' + label(selectedNode) : 'All ' + fl.length + ' flows' }));
+      if (selectedNode) fbar.appendChild(h('button', { class: 'linkbtn', type: 'button', text: 'Show all', onclick: function () { selectedNode = null; applyFilter(); } }));
+      FGROUPS.forEach(function (grp) {
+        var items = fl.filter(grp[1]);
+        if (!items.length) return;
+        var ul = h('ul', { class: 'flows' });
+        items.forEach(function (f) {
+          var fc = FILT[f.filter] || [f.filter, ''];
+          ul.appendChild(h('li', null,
+            h('div', { class: 'route' }, h('span', { text: label(f.from) }), h('span', { class: 'arrow', text: '→' }), f.via ? [h('span', { class: 'ink2', text: label(f.via) }), h('span', { class: 'arrow', text: '→' })] : null, h('span', { text: label(f.to) }),
+              f.highlight ? chip('Anthropic', 'serious', '●') : chip(fc[0], fc[1], f.filter === 'anonymized' ? '✓' : null)),
+            h('div', { class: 'd', text: f.data }),
+            h('div', { class: 't', text: 'When: ' + f.trigger + (f.note ? '. ' + f.note : '') })));
+        });
+        // long groups start folded; a tapped place opens every group it touches
+        var open = !!selectedNode || items.length <= 4;
+        flist.appendChild(h('details', { class: 'fgroup', open: open }, h('summary', null, h('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }), h('h3', null, grp[0], h('span', { class: 'count', text: String(items.length) }))), ul));
+      });
+    }
+    applyFilter();
+
+    var SRANK = { critical: 0, high: 1, medium: 2, low: 3 };
+    var stores = (df.stores || []).slice().sort(function (x, y) { function r(z) { return z.sensitivity in SRANK ? SRANK[z.sensitivity] : 3; } return r(x) - r(y); });
+    var p3 = panel('Where data is stored', h('span', { class: 'note', text: 'tap a row for details · sizes are live' }));
+    var cnt = {};
+    stores.forEach(function (st) { cnt[st.sensitivity] = (cnt[st.sensitivity] || 0) + 1; });
+    p3.appendChild(h('div', { class: 'strip' }, ['critical', 'high', 'medium', 'low'].filter(function (k) { return cnt[k]; }).map(function (k) {
+      return h('span', null, h('b', { text: String(cnt[k]) }), ' ' + k);
+    })));
+    p3.appendChild(h('div', { class: 'stores' }, stores.map(function (st) {
+      var lv = st.live ? (st.live.bytes != null ? fmtBytes(st.live.bytes) + ' · ' : '') + fmtInt(st.live.files) + ' files' : null;
+      return h('details', { class: 'store' },
+        h('summary', null, h('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }), h('b', { text: st.name }), sensChip(st.sensitivity),
+          h('span', { class: lv ? 'w live' : 'w', text: lv || st.where })),
+        h('div', { class: 'body' },
+          h('div', { class: 'h', text: [].concat(st.holds || []).join('; ') }),
+          h('div', { class: 'w', text: st.where }),
+          h('div', { class: 'w', text: st.retention })));
+    })));
+    var g = h('div', { class: 'grid2' });
+    g.appendChild(p2); g.appendChild(p3);
+    v.appendChild(g);
+  }
+
+  // live privacy-vault tiles: counts only (from the vault's audit log and status, cached 30 min by dash-data)
+  function vaultTiles(L) {
+    var wrap = h('div', { class: 'vault-live' });
+    if (!L || L.error) {
+      wrap.appendChild(h('p', { class: 'empty', text: 'Live vault numbers unavailable' + (L && L.error ? ': ' + L.error : '') + '.' }));
+      return wrap;
+    }
+    var NAMES = { documents: 'documents', telegram: 'Telegram', mail: 'mail', finance: 'finances', search: 'cross-search' };
+    var by = L.reads_24h_by || {};
+    var parts = Object.keys(by).filter(function (k) { return by[k]; }).sort(function (x, y) { return by[y] - by[x]; }).map(function (k) { return (NAMES[k] || k) + ' ' + fmtInt(by[k]); });
+    var dl;
+    if (L.reads_avg != null && L.reads_avg > 0) {
+      var pc = Math.round((L.reads_24h - L.reads_avg) / L.reads_avg * 100);
+      dl = h('span', { class: 'delta', text: (pc > 0 ? '▲ +' : pc < 0 ? '▼ ' : '') + pc + '% vs 7-day avg (' + fmtInt(Math.round(L.reads_avg)) + '/day)' });
+    } else dl = h('span', { class: 'delta', text: 'no 7-day average yet' });
+    var t1 = tile('Private lookups · 24 h', fmtInt(L.reads_24h), parts.length ? parts.join(' · ') : 'none', [dl, spark(L.reads_daily || [])], 'reads');
+    t1.setAttribute('title', 'How often I asked the vault for filtered content from your chats, mail, documents or finances');
+    var errs = L.errors_24h || 0, al = L.alerts || 0, healthy = L.llm_ok && !al;
+    var src = L.sources || [], nOn = src.filter(function (x) { return x.ok; }).length;
+    wrap.appendChild(tileRow([t1,
+      tile('Exact text released · 7 d', fmtInt(L.raw_released_7d), 'each needs your one-time code' + (L.raw_tests_7d ? ' · ' + plural(L.raw_tests_7d, 'test') : ''),
+        L.raw_pending ? chip(L.raw_pending + ' waiting for you', 'warn', '◐') : null),
+      tile('Vault filter', healthy ? 'Healthy' : L.llm_ok === false ? 'Down' : 'Check',
+        L.llm + ' (local)' + (L.policy ? ' · policy ' + L.policy : '') + ' · ' + plural(errs, 'error') + ' in 24 h' + (al ? ' · ' + plural(al, 'alert') : ''),
+        healthy ? null : chip(L.llm_ok === false ? 'filter down: lookups wait' : 'needs a look', L.llm_ok === false ? 'critical' : 'warn', '●')),
+      tile('Private sources', nOn + ' of ' + src.length, src.map(function (x) { return x.name + (x.note && x.name !== 'paperless' && x.name !== 'Firefly' ? ' ' + x.note : '') + (x.ok ? '' : ' (off)'); }).join(' · '),
+        nOn === src.length ? null : chip((src.length - nOn) + ' not connected', 'warn', '◐'))
+    ], 'four'));
+    wrap.appendChild(h('p', { class: 'note', text: 'Vault numbers from ' + L.as_of + ': counts from its audit log, never content. Lookups = answers I got from your private sources, already filtered.' }));
+    return wrap;
+  }
+
+  // 7-day column sparkline: past days in a recessive tone, today (so far) in the accent; per-column tooltip
+  function spark(days) {
+    var box = h('div', { class: 'spark chart' });
+    var W = 168, H = 54, BASE = 40, n = days.length || 1, slot = W / n, bw = Math.min(16, slot - 6);
+    var max = Math.max.apply(null, days.map(function (d) { return d.n || 0; }).concat([1]));
+    var svg = s('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': 'Lookups per day: ' + days.map(function (d) { return d.label + ' ' + (d.n == null ? 'no data' : d.n) + (d.today ? ' (today so far)' : ''); }).join(', ') });
+    svg.appendChild(s('path', { d: 'M0 ' + (BASE + 0.5) + ' H' + W, class: 'base' }));
+    var tip = h('div', { class: 'tip', hidden: '' });
+    days.forEach(function (d, i) {
+      var x = i * slot + (slot - bw) / 2;
+      var hgt = d.n ? Math.max(2, Math.round(d.n / max * (BASE - 4))) : 0;
+      var r = Math.min(4, bw / 2, hgt);
+      var y = BASE - hgt;
+      if (hgt) svg.appendChild(s('path', { class: 'col' + (d.today ? ' today' : ''), d: 'M' + x + ' ' + BASE + ' V' + (y + r) + ' Q' + x + ' ' + y + ' ' + (x + r) + ' ' + y + ' H' + (x + bw - r) + ' Q' + (x + bw) + ' ' + y + ' ' + (x + bw) + ' ' + (y + r) + ' V' + BASE + ' Z' }));
+      svg.appendChild(s('text', { class: 'dl' + (d.today ? ' today' : ''), x: i * slot + slot / 2, y: H - 2, 'text-anchor': 'middle', text: d.today ? 'today' : d.label.charAt(0) }));
+      var hit = s('rect', { x: i * slot, y: 0, width: slot, height: H, class: 'hit' });
+      function show() {
+        tip.textContent = '';
+        tip.appendChild(h('span', { class: 't', text: d.today ? 'Today so far' : d.label + ' ' + d.date.slice(8) + '.' + d.date.slice(5, 7) + '.' }));
+        tip.appendChild(h('span', { text: d.n == null ? 'no data (vault not set up yet)' : fmtInt(d.n) + ' lookups' }));
+        tip.hidden = false;
+        var left = Math.min(Math.max(0, (i + 0.5) * slot / W * box.clientWidth - 75), Math.max(0, box.clientWidth - 150));
+        tip.style.left = left + 'px'; tip.style.bottom = (box.clientHeight + 4) + 'px';
+      }
+      hit.addEventListener('mouseenter', show);
+      hit.addEventListener('click', show);
+      hit.addEventListener('mouseleave', function () { tip.hidden = true; });
+      svg.appendChild(hit);
+    });
+    box.appendChild(svg);
+    box.appendChild(tip);
+    return box;
+  }
+  function fmtBytes(b) {
+    if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB';
+    if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+    if (b >= 1e3) return Math.round(b / 1e3) + ' KB';
+    return b + ' B';
+  }
+
+  // ---------------------------------------------------------------- navigation
+  function go(view, noHash, keepScroll) {
+    view = viewOf(view);
+    if (VIEWS.indexOf(view) < 0) view = 'today';
+    current = view;
+    VIEWS.forEach(function (x) {
+      document.getElementById('view-' + x).hidden = x !== view;
+      var t = document.getElementById('tab-' + x);
+      t.setAttribute('aria-selected', String(x === view));
+      t.tabIndex = x === view ? 0 : -1;
+      if (x === view) {   // keep the selected tab visible in the scrolling tab bar (phones)
+        var bar = t.parentNode, br = bar.getBoundingClientRect(), tr = t.getBoundingClientRect();
+        if (tr.right > br.right) bar.scrollLeft += tr.right - br.right + 8;
+        else if (tr.left < br.left) bar.scrollLeft -= br.left - tr.left + 8;
+      }
+    });
+    try { localStorage.setItem('dash-view', view); } catch (e) { /* storage blocked */ }
+    if (!noHash) { try { history.replaceState(null, '', '#' + view); } catch (e) { /* sandboxed */ } }
+    if (!noHash && view === 'architecture' && live.key) lfHash();
+    (charts[view] || []).forEach(function (fn) { fn(); });
+    if (!keepScroll) window.scrollTo(0, 0);
+    if (view !== 'architecture') liveClose();
+    livePulse(view === 'architecture');
+  }
+  document.querySelectorAll('.tab').forEach(function (b) {
+    b.addEventListener('click', function () { go(b.getAttribute('data-view')); });
+    b.addEventListener('keydown', function (e) {
+      var i = VIEWS.indexOf(b.getAttribute('data-view'));
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        var n = VIEWS[(i + (e.key === 'ArrowRight' ? 1 : VIEWS.length - 1)) % VIEWS.length];
+        go(n); document.getElementById('tab-' + n).focus(); e.preventDefault();
+      }
+    });
+  });
+  var rt;
+  window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(function () { (charts[current] || []).forEach(function (fn) { fn(); }); }, 150); });
+
+  // ---------------------------------------------------------------- architecture (static map from <template id="arch-tpl">, no data)
+  function renderArchitecture(v) {
+    var t = document.getElementById('arch-tpl');
+    if (!t || !t.content) { v.appendChild(h('div', { class: 'err', text: 'Architecture map missing from the page.' })); return; }
+    v.appendChild(document.importNode(t.content, true));
+    liveWire(v);
+    if (live.boot) {   // bookmarked view: #architecture&live=KEY&filters
+      var b = live.boot;
+      live.boot = null;
+      if (b.key === 'all' || LIVE_MAP[b.key] || LIVE_NONE[b.key] || v.querySelector('svg.arch [data-edge="' + b.key + '"]'))
+        setTimeout(function () { if (current === 'architecture') liveOpen(b.key, b.f); }, 0);
+    }
+  }
+
+  // ---------------------------------------------------------------- live data flow (flowd over SSE at /live)
+  // Tap a line (or the Main session box): a panel streams that edge's events, backlog first. While the tab is shown,
+  // a content-free pulse stream flashes every line an event passes. flowd edge ids (from→to) map onto the maps'
+  // data-edge ids; the vault lines show what my session sends and gets, lines inside the vault have no feed (I can't see them).
+  var LIVE_MAP = {
+    'telegram-main': ['telegram→me'], 'app-main': ['app→me'], 'main-anthropic': ['me→anthropic'],
+    'main-calendar': ['me→calendar'], 'browser-web': ['me→web'], 'brain-github': ['me→github'],
+    'main-subagents': ['me→subagents'], 'main-browser': ['me→browser'], 'inbox-main': ['inbox→me'],
+    'cron-inbox': ['cron→inbox'], 'cron-nginx': ['cron→nginx', 'me→nginx'], 'cron-unraid': ['me→unraid'],
+    'vaultcli-filter': ['me→vault'], 'filter-vaultcli': ['me→vault'], 'node:main': ['me→tools']
+  };
+  var LIVE_TITLE = {
+    'telegram-main': 'Telegram ⇄ me', 'app-main': 'Claude app ⇄ me', 'main-anthropic': 'Me ⇄ Anthropic API',
+    'main-calendar': 'Me ⇄ Calendar', 'browser-web': 'Me ⇄ the web', 'brain-github': 'Me → GitHub',
+    'main-subagents': 'Me ⇄ subagents', 'main-browser': 'Me → browser', 'inbox-main': 'Inbox and heartbeats → me',
+    'cron-inbox': 'Cron jobs → inbox', 'cron-nginx': 'nginx VM: dashboard and proxy', 'cron-unraid': 'Unraid: ssh and APIs',
+    'vaultcli-filter': 'Vault: my calls', 'filter-vaultcli': 'Vault: answers', 'node:main': 'Main session → tools (shell, files)'
+  };
+  var LIVE_NOTE = {
+    'me→vault': 'Everything my session sees: the vault commands I run and the answers, flags and cards that come back (secrets redacted). What happens inside the vault never reaches me.',
+    'me→anthropic': 'Everything I send to the API and what comes back. Texts are cut at 2 KB; Show all loads the rest.'
+  };
+  var LIVE_NONE = {
+    'vaultbot-approvals': 'The vault bot talks to you directly; this traffic never passes me.',
+    'nginx-dashboard': 'nginx serves this page to you; page views are not streamed.'
+  };
+  var NODE_NAME = { telegram: 'Telegram', app: 'Claude app', me: 'me', anthropic: 'Anthropic', tools: 'tools', subagents: 'subagents',
+    browser: 'browser', web: 'web', calendar: 'Calendar', github: 'GitHub', cron: 'cron', inbox: 'inbox', vault: 'vault',
+    unraid: 'Unraid', nginx: 'nginx VM' };
+  var live = { key: null, es: null, pulse: null, paused: false, panel: null, buf: [], kinds: {}, f: null, srv: '', stale: false, boot: null };
+  // Filters (the live data views are filterable): search (client-side, highlighted), line, kind, from, to,
+  // direction, status, time window. Kept per view in localStorage and in the URL hash (#architecture&live=KEY&q=…), so a
+  // filtered view can be bookmarked. Line/kind/from/to/direction/errors/window also go to flowd (server-side filter, less
+  // traffic); the search stays in the page. flowd never sends more because of a filter: it only drops events.
+  var LF_KEYS = ['q', 'edge', 'kind', 'from', 'to', 'dir', 'st', 'win'];
+  var LF_WIN = [['', 'all buffered'], ['300', 'last 5 min'], ['900', 'last 15 min'], ['3600', 'last 1 h']];
+  var LF_KIND = { message: 'message', reply: 'reply', prompt: 'prompt', output: 'output', request: 'API request', response: 'API response',
+    tool_call: 'tool call', tool_result: 'tool result', launch: 'launch', result: 'result', note: 'note', heartbeat: 'heartbeat',
+    publish: 'publish', vault_call: 'vault call', vault_result: 'vault answer' };
+  function liveOk() { return !!window.EventSource && /^https?:$/.test(location.protocol); }
+  function lel(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function liveSel(key) { return key === 'node:main' ? 'svg.arch [data-node="main"]' : 'svg.arch [data-edge="' + key + '"]'; }
+  function liveEdges(key) { return key === 'all' ? ['*'] : LIVE_MAP[key]; }
+  function liveViewEdges(key) {
+    if (key !== 'all') return LIVE_MAP[key] || [];
+    var s = [];
+    Object.keys(LIVE_MAP).forEach(function (k) { LIVE_MAP[k].forEach(function (e) { if (s.indexOf(e) < 0) s.push(e); }); });
+    return s;
+  }
+  function edgeName(e) { var p = e.split('→'); return (NODE_NAME[p[0]] || p[0]) + ' → ' + (NODE_NAME[p[1]] || p[1]); }
+  function lfDefault() { return { q: '', edge: '', kind: '', from: '', to: '', dir: '', st: '', win: '' }; }
+  function lfClean(o) {   // untrusted input (hash, storage): known keys, short strings, known values only
+    var f = lfDefault();
+    if (!o || typeof o !== 'object') return f;
+    LF_KEYS.forEach(function (k) { if (typeof o[k] === 'string') f[k] = o[k].slice(0, k === 'q' ? 200 : 40); });
+    if (['', 'in', 'out'].indexOf(f.dir) < 0) f.dir = '';
+    if (['', 'ok', 'err'].indexOf(f.st) < 0) f.st = '';
+    if (!LF_WIN.some(function (w) { return w[0] === f.win; })) f.win = '';
+    if (!/^[a-z_]{0,24}$/.test(f.kind)) f.kind = '';
+    if (f.from && !NODE_NAME.hasOwnProperty(f.from)) f.from = '';
+    if (f.to && !NODE_NAME.hasOwnProperty(f.to)) f.to = '';
+    return f;
+  }
+  function lfActive() { return LF_KEYS.some(function (k) { return !!live.f[k]; }); }
+  function lfLoad(key) { try { return lfClean(JSON.parse(localStorage.getItem('dash-live-f:' + key) || 'null')); } catch (e) { return lfDefault(); } }
+  function lfSave() { try { localStorage.setItem('dash-live-f:' + live.key, JSON.stringify(live.f)); } catch (e) { /* storage blocked */ } }
+  function lfHash() {
+    if (current !== 'architecture') return;
+    var s = '#architecture';
+    if (live.key) {
+      s += '&live=' + encodeURIComponent(live.key);
+      LF_KEYS.forEach(function (k) { if (live.f && live.f[k]) s += '&' + k + '=' + encodeURIComponent(live.f[k]); });
+    }
+    try { history.replaceState(null, '', s); } catch (e) { /* sandboxed */ }
+  }
+  function parseHash(h) {   // "#view&live=KEY&q=…" -> {view, live, f}
+    var parts = String(h || '').replace(/^#/, '').split('&'), o = { view: parts[0], live: null, f: {} };
+    parts.slice(1).forEach(function (p) {
+      var i = p.indexOf('='), k = p.slice(0, i), v;
+      if (i < 1) return;
+      try { v = decodeURIComponent(p.slice(i + 1).replace(/\+/g, ' ')); } catch (e) { return; }
+      if (k === 'live') o.live = /^[\w:-]{1,40}$/.test(v) ? v : null;
+      else if (LF_KEYS.indexOf(k) >= 0) o.f[k] = v;
+    });
+    return o;
+  }
+  function livePanel() {
+    if (live.panel) return;
+    var p = lel('aside', 'live'), head = lel('div', 'live-head'), x = lel('button', null, '✕');
+    p.hidden = true; p.setAttribute('role', 'dialog'); p.setAttribute('aria-label', 'Live data flow');
+    live.dot = lel('span', 'live-dot'); live.title = lel('h3'); live.pbtn = lel('button', null, 'Pause');
+    live.pbtn.type = x.type = 'button'; x.setAttribute('aria-label', 'Close');
+    [live.dot, live.title, live.pbtn, x].forEach(function (c) { head.appendChild(c); });
+    live.sub = lel('div', 'live-sub'); live.stext = lel('span', 'ls-text'); live.count = lel('span', 'ls-count');
+    live.sub.appendChild(live.stext); live.sub.appendChild(live.count);
+    live.bar = liveFilterBar(); live.list = lel('div', 'live-list');
+    [head, live.bar, live.sub, live.list].forEach(function (c) { p.appendChild(c); });
+    live.pbtn.addEventListener('click', liveTogglePause);
+    x.addEventListener('click', liveClose);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && live.key) liveClose(); });
+    document.body.appendChild(p);
+    live.panel = p;
+    var open = null;
+    try { open = localStorage.getItem('dash-live-lf'); } catch (e) { /* storage blocked */ }
+    lfGrid(open === null ? window.matchMedia('(min-width: 760px)').matches : open === '1');
+  }
+  function lfSelect(name, label) {
+    var l = lel('label', 'lf-f lf-' + name), s = lel('select');
+    s.setAttribute('data-f', name);
+    l.appendChild(lel('span', null, label));
+    l.appendChild(s);
+    s.addEventListener('change', function () { lfSet(name, s.value); });
+    live.sel[name] = s;
+    return l;
+  }
+  function liveFilterBar() {
+    var bar = lel('div', 'live-filters'), row = lel('div', 'lf-row'), box = lel('div', 'lf-search'), qt;
+    live.sel = {};
+    live.qi = lel('input');
+    live.qi.type = 'search'; live.qi.placeholder = 'Search'; live.qi.autocomplete = 'off'; live.qi.spellcheck = false;
+    live.qi.setAttribute('aria-label', 'Search the shown events');
+    live.qx = lel('button', 'lf-clear', '✕'); live.qx.type = 'button'; live.qx.setAttribute('aria-label', 'Clear search');
+    box.appendChild(live.qi); box.appendChild(live.qx);
+    live.eb = lel('button', 'lf-err', 'Errors only'); live.eb.type = 'button'; live.eb.setAttribute('aria-pressed', 'false');
+    live.fb = lel('button', 'lf-more', 'Filters'); live.fb.type = 'button'; live.fb.setAttribute('aria-expanded', 'false');
+    [box, live.eb, live.fb].forEach(function (c) { row.appendChild(c); });
+    live.grid = lel('div', 'lf-grid');
+    [['edge', 'Line'], ['kind', 'Kind'], ['from', 'From'], ['to', 'To'], ['dir', 'Direction'], ['st', 'Status'], ['win', 'Time']]
+      .forEach(function (d) { live.grid.appendChild(lfSelect(d[0], d[1])); });
+    var rs = lel('button', 'lf-reset', 'Reset filters'); rs.type = 'button';
+    live.grid.appendChild(rs);
+    bar.appendChild(row); bar.appendChild(live.grid);
+    live.qi.addEventListener('input', function () { clearTimeout(qt); qt = setTimeout(function () { lfSet('q', live.qi.value); }, 150); });
+    live.qi.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && live.qi.value) { e.preventDefault(); e.stopPropagation(); live.qi.value = ''; lfSet('q', ''); }
+    });
+    live.qx.addEventListener('click', function () { clearTimeout(qt); live.qi.value = ''; lfSet('q', ''); live.qi.focus(); });
+    live.eb.addEventListener('click', function () { lfSet('st', live.f.st === 'err' ? '' : 'err'); });
+    live.fb.addEventListener('click', function () {
+      lfGrid(live.grid.hidden);
+      try { localStorage.setItem('dash-live-lf', live.grid.hidden ? '0' : '1'); } catch (e) { /* storage blocked */ }
+    });
+    rs.addEventListener('click', function () { clearTimeout(qt); live.f = lfDefault(); lfApply(); });
+    return bar;
+  }
+  function lfGrid(open) {
+    live.grid.hidden = !open;
+    live.fb.setAttribute('aria-expanded', String(!!open));
+    live.panel.classList.toggle('lf-open', !!open);
+  }
+  function lfFill(name, opts, show) {   // rebuild a select only when its options change
+    var s = live.sel[name], sig = JSON.stringify(opts);
+    s.parentNode.hidden = !show;
+    if (s.lfSig !== sig) {
+      s.textContent = '';
+      opts.forEach(function (o) { var op = lel('option', null, o[1]); op.value = o[0]; s.appendChild(op); });
+      s.lfSig = sig;
+    }
+    s.value = live.f[name];
+    if (s.value !== live.f[name]) s.value = '';
+  }
+  function lfOptions() {
+    var ve = liveViewEdges(live.key), nodes = [], kinds = Object.keys(live.kinds), f = live.f;
+    ve.forEach(function (e) { e.split('→').forEach(function (n) { if (nodes.indexOf(n) < 0) nodes.push(n); }); });
+    if (f.kind && kinds.indexOf(f.kind) < 0) kinds.push(f.kind);
+    kinds.sort();
+    var nodeOpts = [['', 'any']].concat(nodes.map(function (n) { return [n, NODE_NAME[n] || n]; }));
+    lfFill('edge', [['', 'all lines']].concat(ve.map(function (e) { return [e, edgeName(e)]; })), ve.length > 1);
+    lfFill('kind', [['', 'all kinds']].concat(kinds.map(function (k) { return [k, LF_KIND[k] || k.replace(/_/g, ' ')]; })), true);
+    lfFill('from', nodeOpts, ve.length > 1);
+    lfFill('to', nodeOpts, ve.length > 1);
+    lfFill('dir', [['', 'both'], ['in', 'to me'], ['out', 'from me']], nodes.indexOf('me') >= 0);
+    lfFill('st', [['', 'all'], ['ok', 'ok'], ['err', 'errors']], true);
+    lfFill('win', LF_WIN, true);
+  }
+  function lfSync() {   // controls show live.f
+    lfOptions();
+    if (live.qi.value !== live.f.q) live.qi.value = live.f.q;
+    live.qx.hidden = !live.f.q;
+    live.eb.setAttribute('aria-pressed', String(live.f.st === 'err'));
+    var n = LF_KEYS.filter(function (k) { return k !== 'q' && live.f[k]; }).length;
+    live.fb.textContent = 'Filters' + (n ? ' · ' + n : '');
+  }
+  function lfSet(name, value) { live.f[name] = value; lfApply(); }
+  function lfApply() {
+    live.f = lfClean(live.f);
+    if (live.f.edge && liveViewEdges(live.key).indexOf(live.f.edge) < 0) live.f.edge = '';
+    lfSync();
+    lfSave();
+    lfHash();
+    if (live.key && liveEdges(live.key) && liveSrvQuery() + '|' + live.f.win !== live.srv) {
+      if (live.paused) live.stale = true;        // reconnect on resume; the shown list is filtered in the page meanwhile
+      else { clearTimeout(live.rt); live.rt = setTimeout(liveConnect, 250); }
+    }
+    liveRender();
+  }
+  function liveSrvQuery() {   // the server-side part of the filter (flowd /live params)
+    var f = live.f, edges = liveEdges(live.key), q;
+    if (f.edge && liveViewEdges(live.key).indexOf(f.edge) >= 0) edges = [f.edge];
+    q = ['edge=' + encodeURIComponent(edges.join(','))];
+    ['kind', 'from', 'to', 'dir'].forEach(function (k) { if (f[k]) q.push(k + '=' + encodeURIComponent(f[k])); });
+    if (f.st === 'err') q.push('err=1');
+    return q.join('&');
+  }
+  function liveStatus(text, cls) { live.stext.textContent = text; live.dot.className = 'live-dot' + (cls ? ' ' + cls : ''); }
+  function liveMark() {
+    document.querySelectorAll('svg.arch .sel').forEach(function (g) { g.classList.remove('sel'); });
+    if (live.key && live.key !== 'all') document.querySelectorAll(liveSel(live.key)).forEach(function (g) { g.classList.add('sel'); });
+  }
+  function liveOpen(key, f) {
+    livePanel();
+    if (live.es) { live.es.close(); live.es = null; }
+    clearTimeout(live.rt);
+    live.key = key; live.paused = false; live.buf = []; live.kinds = {}; live.srv = ''; live.stale = false;
+    live.f = lfClean(f || lfLoad(key));
+    if (live.f.edge && liveViewEdges(key).indexOf(live.f.edge) < 0) live.f.edge = '';
+    live.pbtn.textContent = 'Pause'; live.pbtn.hidden = false;
+    live.list.textContent = '';
+    live.count.textContent = '';
+    live.title.textContent = key === 'all' ? 'All traffic' : LIVE_TITLE[key] || key.replace('-', ' → ');
+    live.panel.hidden = false;
+    document.body.classList.add('live-open');
+    liveMark();
+    if (key !== 'all' && window.matchMedia('(max-width: 759px)').matches) {   // phone: keep the tapped line visible above the sheet
+      var sel = Array.prototype.filter.call(document.querySelectorAll(liveSel(key)), function (g) { return g.getClientRects().length; })[0];
+      if (sel) { var r = sel.getBoundingClientRect(); window.scrollBy({ top: r.top + r.height / 2 - window.innerHeight * 0.27, behavior: 'smooth' }); }
+    }
+    var edges = liveEdges(key);
+    live.bar.hidden = !edges;
+    lfHash();
+    if (!edges) {
+      live.pbtn.hidden = true;
+      liveStatus('no live feed', '');
+      live.list.appendChild(lel('div', 'live-empty', LIVE_NONE[key] || 'Inside the vault: I can’t see this traffic, by design.'));
+      return;
+    }
+    lfSync();
+    var note = key === 'all' ? 'Every line with a feed, newest first.' : LIVE_NOTE[edges[0]];
+    if (note) live.list.appendChild(lel('div', 'live-note', note));
+    clearInterval(live.wt);
+    live.wt = setInterval(function () { if (live.key && live.f.win && !live.paused) lfPrune(); }, 15000);
+    if (!liveOk()) { liveStatus('offline: open the dashboard on its server to watch live', 'err'); return; }
+    liveConnect();
+  }
+  function liveConnect() {
+    clearTimeout(live.rt);
+    if (live.es) { live.es.close(); live.es = null; }
+    if (!live.key || !liveEdges(live.key) || !liveOk()) return;
+    var qs = liveSrvQuery();
+    live.srv = qs + '|' + live.f.win; live.stale = false; live.buf = []; live.kinds = {};
+    liveStatus('connecting…', '');
+    liveRender();
+    var es = new EventSource('live?' + qs + (live.f.win ? '&since=' + Math.floor(Date.now() / 1000 - Number(live.f.win)) : ''));
+    live.es = es;
+    es.addEventListener('hello', function () { if (live.es === es) liveStatus(live.paused ? 'paused' : 'live', live.paused ? '' : 'on'); });
+    es.addEventListener('ev', function (m) {
+      var e;
+      try { e = JSON.parse(m.data); } catch (err) { return; }
+      if (live.es !== es || !e || typeof e !== 'object') return;
+      liveAdd(e);
+    });
+    es.onerror = function () { if (live.es === es) liveStatus(es.readyState === 2 ? 'offline: the live stream is not running' : 'reconnecting…', 'err'); };
+  }
+  function liveClose() {
+    if (live.es) { live.es.close(); live.es = null; }
+    clearTimeout(live.rt);
+    clearInterval(live.wt);
+    live.key = null;
+    if (live.panel) live.panel.hidden = true;
+    document.body.classList.remove('live-open');
+    liveMark();
+    lfHash();
+  }
+  function liveTogglePause() {
+    live.paused = !live.paused;
+    live.pbtn.textContent = live.paused ? 'Resume' : 'Pause';
+    if (live.paused) { liveStatus('paused', ''); liveCount(); return; }
+    live.buf.forEach(function (e) { e._held = false; });
+    liveStatus(live.es ? 'live' : 'connecting…', live.es ? 'on' : '');
+    if (live.stale) liveConnect(); else liveRender();
+  }
+  function liveBytes(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B'; }
+  function liveTime(e) { return new Date(e.t * 1000).toLocaleTimeString('de-CH', { timeZone: 'Europe/Zurich', hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+  function liveDir(e) { return (NODE_NAME[e.from] || e.from) + ' → ' + (NODE_NAME[e.to] || e.to); }
+  function liveBits(e) {
+    var m = e.meta || {}, bits = [];
+    if (m.desc) bits.push(m.desc);
+    if (m.cmd) bits.push(m.cmd);
+    if (m.exit != null) bits.push('exit ' + m.exit);
+    if (m.ms != null) bits.push(m.ms >= 1000 ? (m.ms / 1000).toFixed(1) + ' s' : m.ms + ' ms');
+    if (m.bytes != null) bits.push(liveBytes(m.bytes));
+    if (m.attachment) bits.push('attachment: ' + m.attachment);
+    if (m.agent) bits.push(m.agent);
+    if (m.masked) bits.push(m.masked + ' vault quote' + (m.masked > 1 ? 's' : '') + ' masked');
+    if (m.redacted) bits.push(m.redacted + ' secret' + (m.redacted > 1 ? 's' : '') + ' redacted');
+    if (m.hidden_lines) bits.push(m.hidden_lines + ' vault line' + (m.hidden_lines > 1 ? 's' : '') + ' hidden');
+    if (m.hidden) bits.push(m.hidden);
+    return bits;
+  }
+  function lfErr(e) { var m = e.meta || {}; return (m.exit != null && m.exit !== 0) || !!m.error || e.chip === 'error'; }
+  function lfWords() { return live.f.q.toLowerCase().split(/\s+/).filter(Boolean); }
+  function lfHay(e) {   // what the row shows, lower-cased (the search never sees anything else)
+    var body = e.full || e.text || '';
+    if (e._hayOf !== body) {
+      e._hay = [liveTime(e), liveDir(e), e.chip, e.actor && e.actor !== 'main' ? e.actor : '', body, liveBits(e).join(' · ')].join('\n').toLowerCase();
+      e._hayOf = body;
+    }
+    return e._hay;
+  }
+  function lfMatch(e) {
+    var f = live.f, w = lfWords(), h, i;
+    if ((f.edge && e.edge !== f.edge) || (f.kind && e.kind !== f.kind) || (f.from && e.from !== f.from) || (f.to && e.to !== f.to)) return false;
+    if ((f.dir === 'in' && e.to !== 'me') || (f.dir === 'out' && e.from !== 'me')) return false;
+    if (f.st && lfErr(e) !== (f.st === 'err')) return false;
+    if (f.win && e.t < Date.now() / 1000 - Number(f.win)) return false;
+    if (w.length) { h = lfHay(e); for (i = 0; i < w.length; i++) if (h.indexOf(w[i]) < 0) return false; }
+    return true;
+  }
+  function lfMark(el, text, words) {   // text with <mark> around each search hit, built from DOM nodes only (no HTML parsing)
+    text = String(text == null ? '' : text);
+    var low = text.toLowerCase(), i = 0, first = -1;
+    if (!words.length || low.length !== text.length) { el.textContent = text; return -1; }
+    el.textContent = '';
+    while (i < text.length) {
+      var best = -1, len = 0;
+      words.forEach(function (w) { var j = low.indexOf(w, i); if (j >= 0 && (best < 0 || j < best || (j === best && w.length > len))) { best = j; len = w.length; } });
+      if (best < 0) break;
+      if (best > i) el.appendChild(document.createTextNode(text.slice(i, best)));
+      el.appendChild(lel('mark', 'lf-hit', text.slice(best, best + len)));
+      if (first < 0) first = best;
+      i = best + len;
+    }
+    if (i < text.length) el.appendChild(document.createTextNode(text.slice(i)));
+    return first;
+  }
+  function liveRow(e) {
+    var w = lfWords(), row = lel('div', 'live-ev'), top = lel('div', 'top'), bits = liveBits(e), el;
+    row.lfEv = e;
+    if (lfErr(e)) row.classList.add('is-err');
+    el = lel('time'); lfMark(el, liveTime(e), w); top.appendChild(el);
+    el = lel('span', 'dir'); lfMark(el, liveDir(e), w); top.appendChild(el);
+    el = lel('span', 'chip k-' + String(e.kind).replace(/[^a-z_]/g, '')); lfMark(el, e.chip, w); top.appendChild(el);
+    if (e.actor && e.actor !== 'main') { el = lel('span', 'who'); lfMark(el, e.actor, w); top.appendChild(el); }
+    row.appendChild(top);
+    if (e.text) {
+      var pre = lel('pre'), body = e.full || e.text, at = lfMark(pre, body, w);
+      row.appendChild(pre);
+      if (e.lfOpen || (at >= 0 && (at > 360 || body.slice(0, at).split('\n').length > 6))) row.classList.add('open');   // a hit below the fold opens the row
+      if (e.more || e.text.length > 360 || e.text.split('\n').length > 6) {
+        var label = e.more ? 'Show all' : 'Expand', b = lel('button', null, row.classList.contains('open') ? 'Collapse' : label);
+        b.type = 'button';
+        b.addEventListener('click', function () {
+          e.lfOpen = row.classList.toggle('open');
+          if (e.lfOpen) {
+            b.textContent = 'Collapse';
+            if (e.more && !e.full) {
+              fetch('live/more?id=' + e.id, { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (d) { e.full = d && d.text; lfMark(pre, e.full || e.text + '\n… (the full text is no longer kept)', lfWords()); })
+                .catch(function () { /* offline: keep the 2 KB */ });
+            }
+          } else b.textContent = label;
+        });
+        row.appendChild(b);
+      }
+    }
+    if (bits.length) { el = lel('div', 'meta'); lfMark(el, bits.join(' · '), w); row.appendChild(el); }
+    return row;
+  }
+  function liveAdd(e) {
+    e._held = live.paused;
+    live.buf.push(e);
+    if (live.buf.length > 400) live.buf.shift();
+    if (e.kind && !live.kinds[e.kind]) { live.kinds[e.kind] = 1; lfOptions(); }
+    if (!e._held && lfMatch(e)) {
+      live.list.insertBefore(liveRow(e), live.list.querySelector('.live-ev'));
+      var all = live.list.querySelectorAll('.live-ev');
+      if (all.length > 200) all[all.length - 1].remove();
+    }
+    liveCount();
+  }
+  function liveRender() {
+    if (!live.list) return;
+    live.list.querySelectorAll('.live-ev, .lf-none').forEach(function (r) { r.remove(); });
+    for (var i = live.buf.length - 1, n = 0; i >= 0 && n < 200; i--) {
+      if (live.buf[i]._held || !lfMatch(live.buf[i])) continue;
+      live.list.appendChild(liveRow(live.buf[i]));
+      n++;
+    }
+    liveCount();
+  }
+  function lfPrune() {   // the time window moved on: drop rows that fell out of it
+    live.list.querySelectorAll('.live-ev').forEach(function (r) { if (!lfMatch(r.lfEv)) r.remove(); });
+    liveCount();
+  }
+  function liveCount() {
+    var held = 0, total = 0, shown = live.list.querySelectorAll('.live-ev').length, none = live.list.querySelector('.lf-none');
+    live.buf.forEach(function (e) { if (e._held) held++; else total++; });
+    live.count.textContent = !total ? '' : lfActive() ? shown + ' of ' + total + ' shown' : total + ' event' + (total > 1 ? 's' : '');
+    if (live.paused) live.stext.textContent = 'paused' + (held ? ' · ' + held + ' new' : '');
+    if (!shown && total && lfActive()) {
+      if (!none) {
+        none = lel('div', 'live-empty lf-none', 'No events match the filters. ');
+        var b = lel('button', null, 'Reset filters');
+        b.type = 'button';
+        b.addEventListener('click', function () { live.f = lfDefault(); lfApply(); });
+        none.appendChild(b);
+        live.list.appendChild(none);
+      }
+    } else if (none) none.remove();
+  }
+  function liveKnown(key) { return key === 'all' || !!LIVE_MAP[key] || !!LIVE_NONE[key] || !!document.querySelector('svg.arch [data-edge="' + key + '"]'); }
+  window.addEventListener('hashchange', function () {   // a bookmark pasted into an open tab: follow it (replaceState never fires this)
+    var hp = parseHash(location.hash);
+    if (VIEW_ALIAS[hp.view]) { go(hp.view); return; }   // an old tab name: go() maps it and rewrites the hash
+    if (VIEWS.indexOf(hp.view) < 0) return;
+    if (hp.view !== current) go(hp.view, true);
+    if (hp.view !== 'architecture') return;
+    if (hp.live && liveKnown(hp.live)) liveOpen(hp.live, hp.f);
+    else if (!hp.live && live.key) liveClose();
+  });
+  function liveFlash(p) {
+    var keys = [];
+    if (p.edge === 'me→vault') keys = [p.kind === 'vault_result' ? 'filter-vaultcli' : 'vaultcli-filter'];
+    else Object.keys(LIVE_MAP).forEach(function (k) { if (LIVE_MAP[k].indexOf(p.edge) >= 0) keys.push(k); });
+    keys.forEach(function (k) {
+      document.querySelectorAll(liveSel(k)).forEach(function (g) {
+        g.classList.remove('ping');
+        void g.getBoundingClientRect();
+        g.classList.add('ping');
+        clearTimeout(g.livePt);
+        g.livePt = setTimeout(function () { g.classList.remove('ping'); }, 1300);
+      });
+    });
+  }
+  function livePulse(on) {
+    on = on && liveOk() && !document.hidden;
+    if (on && !live.pulse) {
+      var es = new EventSource('live?pulse=1');
+      es.addEventListener('pulse', function (m) { try { liveFlash(JSON.parse(m.data)); } catch (err) { /* ignore */ } });
+      es.onerror = function () { if (es.readyState === 2 && live.pulse === es) live.pulse = null; };
+      live.pulse = es;
+    } else if (!on && live.pulse) { live.pulse.close(); live.pulse = null; }
+  }
+  document.addEventListener('visibilitychange', function () { livePulse(current === 'architecture'); });
+  function liveWire(root) {
+    root.querySelectorAll('svg.arch [data-edge], svg.arch [data-node="main"]').forEach(function (g) {
+      var key = g.hasAttribute('data-edge') ? g.getAttribute('data-edge') : 'node:main', path = g.querySelector('path.e');
+      if (path) {
+        var hit = path.cloneNode(false);
+        hit.setAttribute('class', 'hit');
+        hit.removeAttribute('marker-start');
+        hit.removeAttribute('marker-end');
+        g.insertBefore(hit, g.firstChild);
+      }
+      g.setAttribute('tabindex', '0');
+      g.setAttribute('role', 'button');
+      g.setAttribute('aria-label', 'Watch live: ' + (LIVE_TITLE[key] || key));
+      g.addEventListener('click', function () { liveOpen(key); });
+      g.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); liveOpen(key); } });
+    });
+    var fig = root.querySelector('.arch-fig');
+    if (fig) {
+      var hint = lel('p', 'note live-hint', 'Tap a line, or the Main session box, to watch its traffic live.'), ab = lel('button', 'live-all', 'All traffic');
+      ab.type = 'button';
+      ab.addEventListener('click', function () { liveOpen('all'); });
+      hint.appendChild(ab);
+      fig.appendChild(hint);
+    }
+    liveMark();
+  }
+
+  // ---------------------------------------------------------------- boot
+  function renderAll() {
+    charts = {};
+    VIEWS.forEach(function (x) { document.getElementById('view-' + x).textContent = ''; });
+    renderHeader();
+    var R = { today: renderToday, usage: renderUsage, activity: renderActivity, codebase: renderCodebase, privacy: renderPrivacy, architecture: renderArchitecture };
+    VIEWS.forEach(function (x) {
+      try { R[x](document.getElementById('view-' + x)); }
+      catch (e) { document.getElementById('view-' + x).appendChild(h('div', { class: 'err', text: 'This section could not be drawn: ' + e.message })); }
+    });
+    var f = document.getElementById('footer');
+    f.textContent = '';
+    f.appendChild(h('span', { text: 'Built by dash-data at ' + D.generated_local + ' Zurich time in ' + D.build_seconds + ' s. Numbers only: no message text, no secrets, no addresses (the Architecture tab\u2019s live view streams filtered text on demand).' }));
+    f.appendChild(h('span', { text: 'This page loads nothing from other sites.' }));
+    go(current, true, true);
+  }
+  function start(data) {
+    D = data;
+    if (!D || !D.tokens) {
+      document.getElementById('view-today').appendChild(h('div', { class: 'err', text: 'No dashboard data yet. Run dash-data on the bot to create it.' }));
+      return;
+    }
+    renderAll();
+  }
+  var hp = parseHash(location.hash), initial = viewOf(hp.view);
+  if (hp.live && initial === 'architecture') live.boot = { key: hp.live, f: hp.f };
+  if (VIEW_ALIAS[hp.view]) { try { history.replaceState(null, '', '#' + initial); } catch (e) { /* sandboxed */ } }   // #health -> #today
+  if (VIEWS.indexOf(initial) < 0) { try { initial = viewOf(localStorage.getItem('dash-view') || 'today'); } catch (e) { initial = 'today'; } }
+  current = VIEWS.indexOf(initial) >= 0 ? initial : 'today';
+  var block = document.getElementById('dash-data');
+  var inline = null;
+  try { inline = JSON.parse(block.textContent); } catch (e) { inline = null; }
+  var mode = block.getAttribute('data-mode');
+  function refresh(first) {
+    return fetch('data.json', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (d) { if (first || !D || d.generated_at !== D.generated_at) start(d); })
+      .catch(function () { if (first) start(inline); });
+  }
+  if (mode === 'inline' || !/^https?:/.test(location.protocol)) start(inline);
+  else {
+    refresh(true);
+    setInterval(function () { refresh(false); }, 5 * 60 * 1000);
+  }
+  setInterval(updateFresh, 60 * 1000);
+})();
+</script>
+<!--/dash:body-->
+</body>
+</html>

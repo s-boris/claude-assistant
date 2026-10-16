@@ -1,0 +1,67 @@
+#!/bin/sh
+# The main session (installed over /usr/local/bin/start-claude by ~/boot.sh at every container start).
+# entrypoint restarts it when it exits; `restart` restarts it on purpose.
+# Telegram: uses telegram-plus (home-plugins) when it's installed, else the official plugin.
+# Kill switch: `touch ~/.telegram-official && restart "rollback"` forces the official plugin.
+# Two fast failures in a row with telegram-plus flip the kill switch and text the owner.
+# Heartbeat mod (heartbeat@home-plugins, 2026-10-11) is enabled only here; the cron heartbeat stays as fallback.
+# Off switch: `touch ~/.heartbeat-mod-off && restart "heartbeat mod off"`. Two fast failures turn it off too.
+cd ~/workspace || exit
+state=~/.local/state/start-claude
+mkdir -p $state
+
+# Bot token: since 2026-10-14 it is no longer a docker env var (host .env line commented out); the plugin reads only its 0600 .env. The unsets below stay as a safety net.
+# at boot. Keep it out of this session's environment so Bash calls, hooks and MCP servers don't inherit it: both
+# Telegram plugins, tg and tg-status read that file at call time. Also drop it from tmux's global env (new panes).
+unset TELEGRAM_BOT_TOKEN
+tmux set-environment -g -u TELEGRAM_BOT_TOKEN 2>/dev/null
+
+# Claude Code can move this conversation into a daemon-hosted background session (it did when
+# background agents started). Then `--continue` refuses ("running in the background") and exits,
+# so a restart would loop forever. Stop that background copy first; the transcript is on disk.
+for pid in $(claude agents --json 2>/dev/null | jq -r --arg cwd "$HOME/workspace" \
+    '.[] | select(.cwd == $cwd and .kind == "background") | .pid // empty'); do
+  kill "$pid" 2>/dev/null
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -9 "$pid" 2>/dev/null
+done
+
+# Pick the conversation back up, unless there isn't one yet.
+ls ~/.claude/projects/-home-node-workspace/*.jsonl >/dev/null 2>&1 && resume=--continue
+plugin=telegram@claude-plugins-official
+if [ ! -e ~/.telegram-official ] && ls -d ~/.claude/plugins/cache/home-plugins/telegram-plus/*/ >/dev/null 2>&1; then
+  plugin=telegram-plus@home-plugins
+fi
+mods=
+if [ ! -e ~/.heartbeat-mod-off ] && ls -d ~/.claude/plugins/cache/home-plugins/heartbeat/*/ >/dev/null 2>&1; then
+  mods=',"heartbeat@home-plugins":true'
+fi
+
+# Settings for this session only (--settings isn't inherited by child processes), 2026-10-11:
+# - disableAgentView: no /background or daemon-hosted copy of this session. Such a copy inherits --channels
+#   and takes over the bot (Oct 9). `claude agents --json` still lists this session. Never as the env var
+#   CLAUDE_CODE_DISABLE_AGENT_VIEW or in user/managed settings: that breaks `claude agents` for the cron
+#   heartbeat, the restart waker, channel-check and the cleanup loop above.
+# - crossSessionInbound refuse: no SendMessage approval dialog from other sessions in this unattended pane.
+#   Channels, Remote Control, subagents and mod prompts are unaffected.
+start=$(date +%s)
+claude $resume --permission-mode bypassPermissions --remote-control claude-bot \
+  --channels "plugin:$plugin" \
+  --settings "{\"enabledPlugins\":{\"$plugin\":true$mods},\"disableAgentView\":true,\"crossSessionInbound\":\"refuse\"}"
+code=$?
+
+if [ $(( $(date +%s) - start )) -lt 60 ]; then
+  n=$(( $(cat $state/fast-fails 2>/dev/null || echo 0) + 1 ))
+  echo $n > $state/fast-fails
+  if [ "$n" -ge 2 ] && { [ "$plugin" = telegram-plus@home-plugins ] || [ -n "$mods" ]; }; then
+    what=
+    [ "$plugin" = telegram-plus@home-plugins ] && { touch ~/.telegram-official; what="fell back to the official Telegram plugin"; }
+    [ -n "$mods" ] && { touch ~/.heartbeat-mod-off; what="${what:+$what and }turned the heartbeat mod off (cron heartbeat continues)"; }
+    echo 0 > $state/fast-fails
+    tg "Main session failed to start twice (exit $code); $what." 2>/dev/null
+  fi
+  sleep 5
+else
+  echo 0 > $state/fast-fails
+fi
+exit $code

@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Swiss public transport connections (transport.opendata.ch; addresses via swisstopo).
+
+  route "Exampletown, Examplestrasse" "Otherstrasse 2, Wallisellen" [--arrive 17:00] [--at 15:50] [--date 2026-10-09] [-n 4]
+
+Addresses work directly ("Street N, Town"); a home stop resolves best as "Town, Streetname" (town first, no
+house number), e.g. "Exampletown, Examplestrasse".
+"""
+import argparse, json, os, sys, urllib.error, urllib.parse, urllib.request
+from datetime import date
+
+API = os.environ.get('ROUTE_API', 'https://transport.opendata.ch/v1')   # test seam (~/opt/route-tests)
+
+def get(url, params):
+    """JSON from the API; a network/HTTP/JSON failure is a one-line error (exit 1), not a traceback."""
+    try:
+        with urllib.request.urlopen(url + '?' + urllib.parse.urlencode(params), timeout=20) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.load(e)['errors'][0]['message']
+        except Exception:
+            why = f'HTTP {e.code}'
+        sys.exit(f'route: transport API error: {why}')
+    except (OSError, ValueError) as e:      # URLError, timeout, junk instead of JSON
+        sys.exit(f'route: transport API unreachable or broken: {getattr(e, "reason", e)}')
+
+ap = argparse.ArgumentParser()
+ap.add_argument('src'); ap.add_argument('dst')
+ap.add_argument('--arrive'); ap.add_argument('--at'); ap.add_argument('--date', default=str(date.today()))
+ap.add_argument('-n', type=int, default=4)
+a = ap.parse_args()
+params = {'from': a.src, 'to': a.dst, 'date': a.date, 'limit': a.n}
+if a.arrive:
+    params.update(time=a.arrive, isArrivalTime=1)
+elif a.at:
+    params.update(time=a.at)
+data = get(API + '/connections', params)
+if not data.get('connections'):
+    sys.exit('no connections found (check spelling; try a nearby stop name)')
+for c in data['connections']:
+    print(f"{c['from']['departure'][11:16]} → {c['to']['arrival'][11:16]}  ({c['duration'][3:8]}, {c['transfers']} transfers)")
+    for s in c['sections']:
+        if s.get('journey'):
+            j = s['journey']
+            print(f"   {s['departure']['departure'][11:16]} {s['departure']['station']['name']} [pl {s['departure'].get('platform') or '-'}] → "
+                  f"{s['arrival']['arrival'][11:16]} {s['arrival']['station']['name']}  {j.get('category') or ''}{j.get('number') or ''} → {j.get('to') or '?'}")
+        elif s.get('walk'):
+            dest = (s['arrival'].get('station') or {}).get('name') or (s['arrival'].get('location') or {}).get('name') or ''   # null-safe
+            print(f"   walk {round((s['walk'].get('duration') or 0) / 60)} min → {dest}")
+    print()

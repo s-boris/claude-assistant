@@ -1,0 +1,11 @@
+{
+  "name": "telegram-plus",
+  "description": "Telegram channel for Claude Code (enhanced fork of telegram@claude-plugins-official 0.0.7): draft streaming, inline/reply keyboards, button and reaction events, rich Markdown messages, polls, locations, albums, pin/delete, effects, custom commands, voice-note auto-transcription, instant commands (/status and an instant.json table of local scripts), images too large or tall for a photo sent as documents, private document intake (/scan private → paperless, never shown to the session). Same access control and state dir.",
+  "version": "0.1.13",
+  "keywords": [
+    "telegram",
+    "messaging",
+    "channel",
+    "mcp"
+  ]
+}
